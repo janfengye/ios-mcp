@@ -439,6 +439,14 @@ git fetch --all --tags
 
 如果存在未提交代码，必须停止发布流程，并提示用户先提交或处理当前改动。
 
+如果 `git fetch --all --tags` 因网络、DNS、GitHub 连接、认证或沙箱权限失败，必须按以下规则处理：
+
+1. 可以重试一次相同命令。
+2. 如果是沙箱网络或 `.git` 写入权限导致失败，可以用提权方式重试。
+3. 如果重试后仍失败，必须停止发布流程。
+4. 停止时要明确说明当前本地状态、失败命令、失败原因，以及恢复发布时应继续执行的下一条命令。
+5. 远端同步没有成功前，不允许继续创建 tag、推送 tag、创建 GitHub Release。
+
 ### 第二步：确认目标版本信息
 
 根据用户输入生成版本信息，并展示给用户：
@@ -512,7 +520,37 @@ Makefile
 
 如果没有需要修改的版本号文件，则不要强行修改。
 
-### 第六步：生成 Release 内容
+### 第六步：构建正式包并检查 Release assets
+
+创建 GitHub Release 前必须构建并检查三种正式包：
+
+```bash
+printf "1\n1\n" | ./build.sh
+printf "2\n1\n" | ./build.sh
+printf "3\n1\n" | ./build.sh
+```
+
+构建完成后必须检查以下文件存在：
+
+```text
+rootful：packages/com.witchan.ios-mcp_版本号_iphoneos-arm.deb
+rootless：packages/com.witchan.ios-mcp_版本号_iphoneos-arm64.deb
+roothide：packages/com.witchan.ios-mcp_版本号_iphoneos-arm64e.deb
+```
+
+如果任一文件不存在，必须停止发布流程，提示用户先构建正式包。不要上传旧版本包、debug 包、带错误版本号的包，或只上传部分 assets。
+
+Release assets 内容必须按以下格式写入 GitHub Release：
+
+```markdown
+## Release assets
+
+rootful: com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+rootless: com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+roothide: com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
+```
+
+### 第七步：生成 Release 内容
 
 根据上一个 tag 到当前版本之间的提交记录生成版本说明。
 
@@ -528,51 +566,57 @@ git tag --sort=-v:refname
 git log 上一个tag..HEAD --oneline
 ```
 
-生成 Release 内容时，优先使用以下格式：
+生成 Release 内容时，必须默认使用中英文双语格式：
 
 ```markdown
-## 更新内容
+## 更新内容 / What's New
+
+### 中文
 
 - xxx
 - xxx
 
-## 修复问题
+### English
 
 - xxx
 - xxx
 
-## 说明
+## 修复问题 / Fixes
+
+### 中文
 
 - xxx
+- xxx
+
+### English
+
+- xxx
+- xxx
+
+## Release assets
+
+rootful: com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+rootless: com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+roothide: com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
 ```
 
-如果本次版本主要是 bug 修复，可以使用：
+默认不要添加 `说明 / Notes` 部分。只有用户明确要求时，才可以增加说明部分。
+
+如果本次版本主要是 bug 修复，内容仍然使用中英文双语格式，但重点放在：
 
 ```markdown
-## 修复问题
-
-- xxx
-- xxx
-
-## 优化内容
-
-- xxx
+## 修复问题 / Fixes
 ```
 
-如果本次版本主要是功能优化，可以使用：
+如果本次版本主要是功能优化，内容仍然使用中英文双语格式，但重点放在：
 
 ```markdown
-## 更新内容
-
-- xxx
-- xxx
-
-## 优化内容
-
-- xxx
+## 更新内容 / What's New
 ```
 
-### 第七步：Release 内容必须让用户确认
+Release 内容不得只写中文，也不得只写英文。
+
+### 第八步：Release 内容必须让用户确认
 
 创建 GitHub Release 之前，必须展示完整 Release 内容。
 
@@ -592,14 +636,38 @@ iOS MCP v1.1.0
 
 Release 内容：
 
-## 更新内容
+## 更新内容 / What's New
+
+### 中文
 
 - xxx
 - xxx
 
-## 修复问题
+### English
 
 - xxx
+- xxx
+
+## 修复问题 / Fixes
+
+### 中文
+
+- xxx
+
+### English
+
+- xxx
+
+## Release assets
+
+rootful: com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+rootless: com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+roothide: com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
+
+Release assets：
+packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
 
 准备执行的操作：
 
@@ -611,7 +679,9 @@ Release 内容：
 6. 在 main 上创建 tag v1.1.0
 7. 推送 main
 8. 推送 tag
-9. 创建 GitHub Release
+9. 构建并检查三种正式包
+10. 通过 GitHub REST API 创建/更新 GitHub Release
+11. 上传三个 Release assets
 
 是否确认发布？
 ```
@@ -639,6 +709,13 @@ git commit -m "release: 发布 v1.1.0"
 git push -u origin release-1.1.0
 ```
 
+如果推送失败，必须按以下规则处理：
+
+1. 可以重试一次相同命令。
+2. 如果是网络或沙箱问题，可以用提权方式重试。
+3. 如果仍然失败，必须停止后续流程，不允许继续合并 main、创建 tag 或创建 GitHub Release。
+4. 停止时要说明当前分支、当前提交、是否已本地提交、远端是否已更新，以及恢复时应该执行的下一条命令。
+
 ### 3. 合并 release 分支到 main
 
 发布版本时，release 分支确认完成后，必须合并回 main。
@@ -665,6 +742,8 @@ git merge --no-ff release-1.1.0 -m "release: 合并 v1.1.0 到 main"
 git push origin main
 ```
 
+如果 `git push origin main` 失败，必须停止后续 tag 和 GitHub Release 流程。只有 main 成功推送到远端后，才能继续创建 tag。
+
 ### 4. 在 main 上创建 tag
 
 合并到 main 后，在 main 分支上创建 tag：
@@ -679,17 +758,42 @@ git tag -a v1.1.0 -m "release: 发布 v1.1.0"
 git push origin v1.1.0
 ```
 
-### 5. 创建 GitHub Release
+如果 tag 推送失败，必须停止 GitHub Release 创建流程。只有 tag 成功推送到远端后，才能创建 GitHub Release。
 
-优先使用 GitHub CLI 创建 Release：
+### 5. 构建正式包和检查 assets
 
 ```bash
-gh release create v1.1.0 \
-  --title "iOS MCP v1.1.0" \
-  --notes "用户确认后的 Release 内容"
+printf "1\n1\n" | ./build.sh
+printf "2\n1\n" | ./build.sh
+printf "3\n1\n" | ./build.sh
+ls -l packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+ls -l packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+ls -l packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
 ```
 
-如果当前环境没有 `gh` 命令，必须提示用户需要安装并登录 GitHub CLI，或者让用户手动在 GitHub 页面创建 Release。
+### 6. 创建 GitHub Release
+
+本项目创建 GitHub Release 时，优先使用 GitHub REST API，不默认依赖 `gh` 命令。
+
+GitHub REST API 规则：
+
+1. 使用 `git credential fill` 从本地 Git 凭据中读取 GitHub token。
+2. 不允许在日志、终端输出或最终回复中打印 token。
+3. 如果无法读取 GitHub token，必须停止并提示用户配置 GitHub 凭据。
+4. 先通过 `GET /repos/witchan/ios-mcp/releases/tags/v1.1.0` 检查 Release 是否存在。
+5. 如果 Release 不存在，使用 `POST /repos/witchan/ios-mcp/releases` 创建。
+6. 如果 Release 已存在，使用 `PATCH /repos/witchan/ios-mcp/releases/{release_id}` 更新标题和内容。
+7. 上传 assets 前检查同名 asset 是否存在。
+8. 如果同名 asset 已存在，必须在用户确认过“覆盖/更新 assets”的前提下，先删除旧 asset，再上传新 asset。
+9. 上传以下三个 assets：
+
+```text
+packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
+```
+
+创建/更新完成后，必须输出 GitHub Release URL 和三个 assets 的下载链接。
 
 不要在没有用户确认 Release 内容的情况下创建 GitHub Release。
 
@@ -732,11 +836,17 @@ tag：v1.1.0
 GitHub Release：iOS MCP v1.1.0
 main 分支：已同步到 v1.1.0
 release 分支：已保留
+Release assets：
+rootful：com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
+rootless：com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
+roothide：com.witchan.ios-mcp_1.1.0_iphoneos-arm64e.deb
 ```
 
 ---
 
 ## 十一、常见场景处理规则
+
+本章节用于判断提交日志类型和 Release 内容归类。正式 GitHub Release 仍必须遵守第七步的中英文双语格式，并包含 `Release assets`。
 
 ### 1. 优化功能后发版
 
@@ -854,9 +964,18 @@ Email：witchan028@126.com
 
 ```text
 版本号
-Changes Made
+Changes Made（必须中英文双语）
 deb 路径
 ```
+
+BigBoss 的 `Changes Made` 默认必须使用简短中英文双语，不要写成长篇 Release notes。必须先中文、再英文。推荐格式：
+
+```text
+中文：xxx。
+EN: xxx.
+```
+
+如果用户只提供中文或英文，必须先补齐另一种语言，并在提交前展示给用户确认。
 
 ### 3. 用户确认内容
 
@@ -869,7 +988,8 @@ deb 路径
 1.1.0
 
 Changes Made：
-xxx
+中文：xxx。
+EN: xxx.
 
 rootful deb：
 packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb
@@ -881,14 +1001,16 @@ packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb
 
 python3 scripts/submit_bigboss_update.py \
   --version 1.1.0 \
-  --changes "xxx" \
+  --changes "中文：xxx。
+EN: xxx." \
   --response-out .codex-session-data/bigboss_update_1.1.0_rootful_response.html \
   packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm.deb \
   --submit
 
 python3 scripts/submit_bigboss_update.py \
   --version 1.1.0 \
-  --changes "xxx" \
+  --changes "中文：xxx。
+EN: xxx." \
   --response-out .codex-session-data/bigboss_update_1.1.0_rootless_response.html \
   packages/com.witchan.ios-mcp_1.1.0_iphoneos-arm64.deb \
   --submit
@@ -935,14 +1057,14 @@ python3 scripts/submit_bigboss_update.py --help
 ```bash
 python3 scripts/submit_bigboss_update.py \
   --version 版本号 \
-  --changes "用户确认后的 Changes Made" \
+  --changes "用户确认后的中英文双语 Changes Made" \
   --response-out .codex-session-data/bigboss_update_版本号_rootful_response.html \
   packages/com.witchan.ios-mcp_版本号_iphoneos-arm.deb \
   --submit
 
 python3 scripts/submit_bigboss_update.py \
   --version 版本号 \
-  --changes "用户确认后的 Changes Made" \
+  --changes "用户确认后的中英文双语 Changes Made" \
   --response-out .codex-session-data/bigboss_update_版本号_rootless_response.html \
   packages/com.witchan.ios-mcp_版本号_iphoneos-arm64.deb \
   --submit
@@ -983,3 +1105,6 @@ Codex 必须始终遵守以下要求：
 9. 发布完成后必须保留 release 分支。
 10. 未经用户确认，不允许提交、推送、打 tag、创建 GitHub Release。
 11. 未经用户确认，不允许提交 BigBoss 更新表单。
+12. GitHub Release 默认使用 GitHub REST API 创建/更新，并上传 rootful、rootless、roothide 三个正式包。
+13. GitHub Release 内容默认使用中英文双语格式，并包含 Release assets；默认不添加说明部分。
+14. GitHub 网络或沙箱失败时必须停止危险后续步骤，明确说明本地状态和恢复命令。
