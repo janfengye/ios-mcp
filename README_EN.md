@@ -72,7 +72,7 @@ http://DEVICE_IP:8090/health
 3. If you get the following response, the service is running correctly:
 
 ```json
-{"status":"ok","server":"ios-mcp","version":"1.2.0"}
+{"status":"ok","server":"ios-mcp","version":"1.2.0","protocolVersion":"2025-11-25","supportedProtocolVersions":["2025-11-25","2025-06-18","2025-03-26"]}
 ```
 
 ## Usage
@@ -92,6 +92,7 @@ curl 'http://device-ip:8090/download_file?path=/var/mobile/...' -o output.bin
 ## Security Notes
 
 - The MCP server has no built-in authentication — it is recommended to use it only on local networks
+- MCP protocol support defaults to `2025-11-25` and remains compatible with `2025-06-18` and `2025-03-26`; HTTP responses include `MCP-Protocol-Version`
 - When the device is locked or the screen is off, the server blocks interactive/mutating tools such as tap, swipe, text input, app launch, and shell commands; observation, screenshot, and wake/recovery tools remain allowed
 - The `run_command` tool can execute arbitrary shell commands — use with caution
 - `read_file` / `write_file` / `download_file` can read and write device paths within the MCP server process's permission scope, at the same risk level as `run_command` — use only on trusted networks

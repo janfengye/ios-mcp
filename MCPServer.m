@@ -27,9 +27,10 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 
-#define MCP_PROTOCOL_VERSION @"2025-03-26"
-#define MCP_SERVER_NAME      @"ios-mcp"
-#define MCP_SERVER_VERSION   @"1.2.0"
+#define MCP_PROTOCOL_VERSION_LATEST @"2025-11-25"
+#define MCP_PROTOCOL_VERSION_LEGACY @"2025-03-26"
+#define MCP_SERVER_NAME             @"ios-mcp"
+#define MCP_SERVER_VERSION          @"1.2.0"
 #define HTTP_BUF_SIZE        (256 * 1024)
 #define MCP_MAX_CHUNK_LINE   (8 * 1024)
 #define MCP_UPLOAD_DIR       @"/tmp/ios-mcp-uploads"
@@ -209,6 +210,33 @@ static void MCPSetHTTPBodyError(int *errorStatus, NSString **errorMessage, int s
     if (errorMessage) {
         *errorMessage = message;
     }
+}
+
+static NSArray<NSString *> *MCPSupportedProtocolVersions(void) {
+    static NSArray<NSString *> *versions = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        versions = @[
+            MCP_PROTOCOL_VERSION_LATEST,
+            @"2025-06-18",
+            MCP_PROTOCOL_VERSION_LEGACY
+        ];
+    });
+    return versions;
+}
+
+static BOOL MCPSupportsProtocolVersion(NSString *version) {
+    if (![version isKindOfClass:[NSString class]] || version.length == 0) {
+        return NO;
+    }
+    return [MCPSupportedProtocolVersions() containsObject:version];
+}
+
+static NSString *MCPNegotiateProtocolVersion(NSString *clientVersion) {
+    if (MCPSupportsProtocolVersion(clientVersion)) {
+        return clientVersion;
+    }
+    return MCP_PROTOCOL_VERSION_LATEST;
 }
 
 static void MCPAddWhitelistedKeys(NSMutableDictionary *destination, NSDictionary *source, NSArray<NSString *> *keys) {
@@ -527,7 +555,7 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
                             errorMessage:(NSString **)errorMessage;
 - (void)handleMCPRequest:(NSData *)bodyData clientSocket:(int)clientSocket requestLogId:(NSString *)requestLogId;
 - (NSDictionary *)routeMCPRequest:(NSDictionary *)request;
-- (NSDictionary *)handleInitialize:(id)reqId;
+- (NSDictionary *)handleInitialize:(id)reqId params:(NSDictionary *)params;
 - (NSDictionary *)handleToolsList:(id)reqId;
 - (NSDictionary *)handleToolsCall:(id)reqId params:(NSDictionary *)params;
 - (NSDictionary *)lockedScreenGuardResponseForTool:(NSString *)toolName reqId:(id)reqId;
@@ -573,6 +601,8 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
 - (NSDictionary *)executeGetSyslog:(id)reqId args:(NSDictionary *)args;
 - (NSDictionary *)executeGetCrashLogs:(id)reqId args:(NSDictionary *)args;
 - (NSDictionary *)executeReadCrashLog:(id)reqId args:(NSDictionary *)args;
+- (NSString *)jsonTextForObject:(id)object;
+- (NSString *)jsonTextForDictionary:(NSDictionary *)dict;
 - (NSDictionary *)sanitizeFrontmostInfo:(NSDictionary *)info debug:(BOOL)debug;
 - (NSDictionary *)sanitizeUIElementsPayload:(NSDictionary *)payload debug:(BOOL)debug;
 - (NSDictionary *)sanitizeUIElement:(NSDictionary *)element debug:(BOOL)debug;
@@ -581,12 +611,17 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
 - (NSDictionary *)sanitizeAccessibilityFailurePayload:(NSDictionary *)payload debug:(BOOL)debug;
 - (NSDictionary *)mcpSuccess:(id)reqId text:(NSString *)text;
 - (NSDictionary *)mcpSuccess:(id)reqId text:(NSString *)text isError:(BOOL)isError;
+- (NSDictionary *)mcpSuccess:(id)reqId structuredContent:(NSDictionary *)structuredContent;
+- (NSDictionary *)mcpSuccess:(id)reqId structuredContent:(NSDictionary *)structuredContent isError:(BOOL)isError;
+- (NSDictionary *)mcpSuccess:(id)reqId text:(NSString *)text structuredContent:(NSDictionary *)structuredContent isError:(BOOL)isError;
 - (NSDictionary *)mcpError:(id)reqId code:(NSInteger)code message:(NSString *)message;
 - (void)sendJSONResponse:(int)socket status:(int)status body:(NSDictionary *)body requestLogId:(NSString *)requestLogId;
 - (void)sendErrorResponse:(int)socket status:(int)status message:(NSString *)message requestLogId:(NSString *)requestLogId;
 - (void)sendMethodNotAllowedResponse:(int)socket allowedMethods:(NSString *)allowedMethods message:(NSString *)message requestLogId:(NSString *)requestLogId;
 - (void)sendEmptyResponse:(int)socket status:(int)status requestLogId:(NSString *)requestLogId;
 - (void)writeAll:(int)socket data:(NSData *)data requestLogId:(NSString *)requestLogId;
+- (NSString *)negotiatedProtocolVersion;
+- (void)setNegotiatedProtocolVersion:(NSString *)version;
 @end
 
 @implementation MCPServer {
@@ -594,6 +629,7 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
     dispatch_source_t _acceptSource;
     dispatch_queue_t _clientQueue;
     NSString *_sessionId;
+    NSString *_negotiatedProtocolVersion;
 }
 
 + (instancetype)sharedInstance {
@@ -611,8 +647,24 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
         _serverSocket = -1;
         _clientQueue = dispatch_queue_create("com.witchan.ios-mcp.client", DISPATCH_QUEUE_CONCURRENT);
         _sessionId = [[NSUUID UUID] UUIDString];
+        _negotiatedProtocolVersion = MCP_PROTOCOL_VERSION_LATEST;
     }
     return self;
+}
+
+- (NSString *)negotiatedProtocolVersion {
+    @synchronized (self) {
+        return _negotiatedProtocolVersion ?: MCP_PROTOCOL_VERSION_LATEST;
+    }
+}
+
+- (void)setNegotiatedProtocolVersion:(NSString *)version {
+    if (!MCPSupportsProtocolVersion(version)) {
+        return;
+    }
+    @synchronized (self) {
+        _negotiatedProtocolVersion = [version copy];
+    }
 }
 
 #pragma mark - Server Lifecycle
@@ -758,19 +810,34 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
     }
     NSString *transferEncoding = [headers[@"transfer-encoding"] lowercaseString] ?: @"";
     BOOL chunkedBody = [transferEncoding containsString:@"chunked"];
+    NSString *protocolVersionHeader = headers[@"mcp-protocol-version"];
 
     ssize_t bodyReceived = totalRead - headerEnd;
     NSString *basePath = MCPBasePath(path);
     BOOL suppressSuccessfulHealthLog = [method isEqualToString:@"GET"] && [basePath isEqualToString:@"/health"];
     if (!suppressSuccessfulHealthLog) {
-        [MCPLogger log:@"http_request req=%@ sock=%d method=%@ path=%@ contentLength=%ld transferEncoding=%@ initialBodyBytes=%ld",
+        [MCPLogger log:@"http_request req=%@ sock=%d method=%@ path=%@ contentLength=%ld transferEncoding=%@ protocolVersion=%@ initialBodyBytes=%ld",
          requestLogId,
          clientSocket,
          method ?: @"<nil>",
          basePath ?: @"<nil>",
          (long)contentLength,
          transferEncoding.length ? transferEncoding : @"identity",
+         protocolVersionHeader.length ? protocolVersionHeader : @"-",
          (long)MAX((ssize_t)0, bodyReceived)];
+    }
+
+    if ([basePath isEqualToString:@"/mcp"] && protocolVersionHeader.length > 0) {
+        if (!MCPSupportsProtocolVersion(protocolVersionHeader)) {
+            [self sendErrorResponse:clientSocket
+                              status:400
+                             message:[NSString stringWithFormat:@"Unsupported MCP protocol version: %@", protocolVersionHeader]
+                        requestLogId:requestLogId];
+            free(buffer);
+            close(clientSocket);
+            return;
+        }
+        [self setNegotiatedProtocolVersion:protocolVersionHeader];
     }
 
     // Route request
@@ -844,7 +911,13 @@ static NSDictionary *MCPElementSummary(NSDictionary *element) {
     } else if ([basePath isEqualToString:@"/download_file"]) {
         [self sendMethodNotAllowedResponse:clientSocket allowedMethods:@"GET" message:@"Method Not Allowed" requestLogId:requestLogId];
     } else if ([method isEqualToString:@"GET"] && [basePath isEqualToString:@"/health"]) {
-        NSDictionary *health = @{@"status": @"ok", @"server": MCP_SERVER_NAME, @"version": MCP_SERVER_VERSION};
+        NSDictionary *health = @{
+            @"status": @"ok",
+            @"server": MCP_SERVER_NAME,
+            @"version": MCP_SERVER_VERSION,
+            @"protocolVersion": [self negotiatedProtocolVersion],
+            @"supportedProtocolVersions": MCPSupportedProtocolVersions()
+        };
         [self sendJSONResponse:clientSocket status:200 body:health requestLogId:nil];
     } else {
         [self sendErrorResponse:clientSocket status:404 message:@"Not Found" requestLogId:requestLogId];
@@ -1362,7 +1435,7 @@ static NSString *MCPLogId(id reqId) {
     }
 
     if ([method isEqualToString:@"initialize"]) {
-        return [self handleInitialize:reqId];
+        return [self handleInitialize:reqId params:params];
     } else if ([method isEqualToString:@"notifications/initialized"]) {
         return nil; // notification, no response
     } else if ([method isEqualToString:@"ping"]) {
@@ -1382,18 +1455,30 @@ static NSString *MCPLogId(id reqId) {
 
 #pragma mark - MCP: initialize
 
-- (NSDictionary *)handleInitialize:(id)reqId {
+- (NSDictionary *)handleInitialize:(id)reqId params:(NSDictionary *)params {
+    NSString *clientProtocolVersion = [params[@"protocolVersion"] isKindOfClass:[NSString class]] ? params[@"protocolVersion"] : nil;
+    NSString *negotiatedProtocolVersion = MCPNegotiateProtocolVersion(clientProtocolVersion);
+    [self setNegotiatedProtocolVersion:negotiatedProtocolVersion];
+
     return @{
         @"jsonrpc": @"2.0",
         @"id": reqId ?: [NSNull null],
         @"result": @{
-            @"protocolVersion": MCP_PROTOCOL_VERSION,
+            @"protocolVersion": negotiatedProtocolVersion,
             @"capabilities": @{
                 @"tools": @{@"listChanged": @NO}
             },
             @"serverInfo": @{
                 @"name": MCP_SERVER_NAME,
                 @"version": MCP_SERVER_VERSION
+            },
+            @"_meta": @{
+                @"protocolCompatibility": @{
+                    @"requestedVersion": clientProtocolVersion ?: @"",
+                    @"negotiatedVersion": negotiatedProtocolVersion,
+                    @"supportedVersions": MCPSupportedProtocolVersions(),
+                    @"httpHeader": @"MCP-Protocol-Version"
+                }
             },
             @"instructions": @"Use ios-mcp to inspect and operate the connected iPhone.\n\nGetting started: call get_frontmost_app, get_screen_info, get_ui_elements, and screenshot to understand the current device state. get_screen_info includes device_state when SpringBoard exposes it. If locked is true, screen_on is false, the screenshot looks like the Lock Screen, or UI elements are from SpringBoard/Lock Screen, do not continue normal app automation until the device is awake/unlocked.\n\nLock screen handling: a single press_home only wakes or advances the Lock Screen and must not be treated as reaching the Home screen. Use wake_and_home when the device may be locked/off. The equivalent manual sequence is Power then Home when the screen is off, or Home twice when the Lock Screen is already visible. After wake_and_home, verify with screenshot/get_ui_elements/get_frontmost_app before continuing. The server enforces a lock guard: while locked or screen_off, interactive and mutating tools are blocked; only observation and recovery tools are allowed.\n\nTouch and gestures: use screen point coordinates for tap_screen, swipe_screen, long_press, double_tap, and drag_and_drop. For Flutter or custom-rendered apps, accessibility may expose only a container such as FlutterView; use screenshot plus coordinates in that case.\n\nText input: use input_text first for fast bulk text through system keyboard events. If input_text returns isError or reports failure/timeout, immediately retry the same text with type_text; do not repeat input_text. Use type_text for character-by-character input and press_key for special keys (enter, delete, tab, etc.).\n\nHardware buttons: press_home, press_power, press_volume_up, press_volume_down, toggle_mute, wake_and_home.\n\nClipboard: get_clipboard and set_clipboard to read/write clipboard contents.\n\nScreenshot: the screenshot tool returns MCP image content, not text — result.content[0].data contains the base64 JPEG payload and result.content[0].mimeType is usually image/jpeg.\n\nApp management: launch_app, kill_app, list_apps, list_running_apps, get_frontmost_app. launch_app waits until the target app is actually frontmost before returning, so do not immediately re-issue redundant foreground checks unless you need to verify a later transition. To install an app from the computer, first upload raw IPA bytes to POST /upload_file (for example: curl -H 'X-Filename: app.ipa' --data-binary @app.ipa http://device-ip:8090/upload_file). The upload response returns a device path; pass that path to install_app. To install an IPA already on the phone, call install_app directly with its device path. Unsigned or fakesigned IPAs are supported. To uninstall: use list_apps to find the bundle_id, then call uninstall_app.\n\nDevice control: get_brightness/set_brightness, get_volume/set_volume, open_url (supports http/https and URL schemes like tel://, prefs:root=WIFI, etc.).\n\nDevice info: get_device_info for model, iOS version, battery, storage, memory, and jailbreak type/package information. Pass debug=true only when diagnosing installation integrity to include bundled helper executable status.\n\nHealth checks: avoid shell brace expansion such as for i in {1..30}; ios-mcp commands often run under /bin/sh where that may execute only once. Use seq or a while loop, and use at least --connect-timeout 3 plus --max-time 5 for /health.\n\nShell: run_command to execute shell commands on the device (timeout default 10s, max 30s).\n\nReverse engineering and debugging: get_app_info returns an installed app's bundle path, data container (sandbox) path, App Group container paths, executable path, version, and entitlements — call it first to locate files. list_dir, read_file, and write_file operate on the device filesystem and fall back to the privileged mcp-root helper for protected paths (other apps' sandboxes, system dirs). read_file returns utf8 for text and base64 for binary; it is capped (default 512KB), so for large or binary files use GET /download_file?path=<device-path> to stream the full file (for example: curl 'http://device-ip:8090/download_file?path=/var/mobile/...' -o out.bin). get_syslog captures the live unified system log across all processes (the stream Console.app shows) for a few seconds — it is a live capture, so trigger the activity you want to observe during the window. get_crash_logs lists crash reports (filter by bundle_id), and read_crash_log returns a single report's full text. write_file is blocked while the device is locked or the screen is off."
         }
@@ -2108,9 +2193,7 @@ static NSString *MCPLogId(id reqId) {
         @"allowed_tools": MCPLockGuardAllowedTools(),
         @"next_step": @"Call wake_and_home first, then verify with screenshot/get_ui_elements/get_frontmost_app before retrying the blocked tool."
     };
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr ?: @"Tool blocked while device is locked or screen is off" isError:YES];
+    return [self mcpSuccess:reqId structuredContent:payload isError:YES];
 }
 
 #pragma mark - Tool Execution Helpers
@@ -2156,9 +2239,7 @@ static NSString *MCPLogId(id reqId) {
                     @"recommended_tool": @"wake_and_home",
                     @"warning": @"The device was locked or the screen was off before this Home press. Do not assume this reached the Home screen; call wake_and_home or verify with screenshot/get_ui_elements/get_frontmost_app."
                 };
-                NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
-                NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-                return [self mcpSuccess:reqId text:jsonStr];
+                return [self mcpSuccess:reqId structuredContent:result];
             }
         }
         return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"%@ button pressed (%.0fms)", label, duration]];
@@ -2258,9 +2339,7 @@ static NSString *MCPLogId(id reqId) {
         @"verify_required": @YES,
         @"next_step": @"Call screenshot, get_ui_elements, or get_frontmost_app before continuing. Do not assume this reached the Home screen without verification."
     };
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeTap:(id)reqId args:(NSDictionary *)args {
@@ -2351,12 +2430,12 @@ static NSString *MCPLogId(id reqId) {
     if (matches.count == 0) {
         NSDictionary *result = @{@"tapped": @NO, @"reason": @"no_match",
                                  @"query": @{@"text": text ?: @"", @"role": type ?: @"", @"exact": @(exact)}};
-        return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result] isError:YES];
+        return [self mcpSuccess:reqId structuredContent:result isError:YES];
     }
     if (index < 0 || index >= (NSInteger)matches.count) {
         NSDictionary *result = @{@"tapped": @NO, @"reason": @"index_out_of_range",
                                  @"matched_count": @(matches.count), @"index": @(index)};
-        return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result] isError:YES];
+        return [self mcpSuccess:reqId structuredContent:result isError:YES];
     }
 
     NSDictionary *target = matches[(NSUInteger)index];
@@ -2364,7 +2443,7 @@ static NSString *MCPLogId(id reqId) {
     double tapX = 0, tapY = 0;
     if (![tap[@"x"] respondsToSelector:@selector(doubleValue)] || ![tap[@"y"] respondsToSelector:@selector(doubleValue)]) {
         NSDictionary *result = @{@"tapped": @NO, @"reason": @"no_tap_point", @"element": MCPElementSummary(target)};
-        return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result] isError:YES];
+        return [self mcpSuccess:reqId structuredContent:result isError:YES];
     }
     tapX = [tap[@"x"] doubleValue];
     tapY = [tap[@"y"] doubleValue];
@@ -2380,11 +2459,11 @@ static NSString *MCPLogId(id reqId) {
         NSDictionary *result = @{@"tapped": @YES, @"matched_count": @(matches.count),
                                  @"index": @(index), @"point": @{@"x": @(tapX), @"y": @(tapY)},
                                  @"element": MCPElementSummary(target)};
-        return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+        return [self mcpSuccess:reqId structuredContent:result];
     }
     NSDictionary *result = @{@"tapped": @NO, @"reason": @"tap_failed", @"error": err ?: @"timeout",
                              @"element": MCPElementSummary(target)};
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result] isError:YES];
+    return [self mcpSuccess:reqId structuredContent:result isError:YES];
 }
 
 - (NSDictionary *)executeWaitForElement:(id)reqId args:(NSDictionary *)args waitForAppear:(BOOL)waitForAppear {
@@ -2426,7 +2505,7 @@ static NSString *MCPLogId(id reqId) {
                 result[@"disappeared"] = @YES;
             }
             result[@"waited_ms"] = @(waited);
-            return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+            return [self mcpSuccess:reqId structuredContent:result];
         }
 
         if ([[NSDate date] compare:deadline] != NSOrderedAscending) break;
@@ -2437,7 +2516,7 @@ static NSString *MCPLogId(id reqId) {
     NSDictionary *result = waitForAppear
         ? @{@"found": @NO, @"waited_ms": @(waited)}
         : @{@"disappeared": @NO, @"waited_ms": @(waited)};
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result] isError:YES];
+    return [self mcpSuccess:reqId structuredContent:result isError:YES];
 }
 
 - (NSDictionary *)executeSwipe:(id)reqId args:(NSDictionary *)args {
@@ -2482,9 +2561,7 @@ static NSString *MCPLogId(id reqId) {
 
 - (NSDictionary *)executeScreenInfo:(id)reqId {
     NSDictionary *info = [[ScreenManager sharedInstance] screenInfo];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId structuredContent:info];
 }
 
 - (NSDictionary *)executeScreenshot:(id)reqId args:(NSDictionary *)args {
@@ -2523,9 +2600,7 @@ static NSString *MCPLogId(id reqId) {
 
 - (NSDictionary *)executeGetClipboard:(id)reqId {
     NSDictionary *info = [[ClipboardManager sharedInstance] readClipboard];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId structuredContent:info];
 }
 
 - (NSDictionary *)executeSetClipboard:(id)reqId args:(NSDictionary *)args {
@@ -2583,16 +2658,18 @@ static NSString *MCPLogId(id reqId) {
     }
     if (type.length == 0) type = @"user";
     NSArray *apps = [[AppManager sharedInstance] listInstalledApps:type];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:apps options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId
+                       text:[self jsonTextForObject:apps ?: @[]]
+          structuredContent:@{@"apps": apps ?: @[], @"type": type}
+                    isError:NO];
 }
 
 - (NSDictionary *)executeListRunningApps:(id)reqId {
     NSArray *apps = [[AppManager sharedInstance] listRunningApps];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:apps options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId
+                       text:[self jsonTextForObject:apps ?: @[]]
+          structuredContent:@{@"apps": apps ?: @[]}
+                    isError:NO];
 }
 
 - (NSDictionary *)executeGetFrontmostApp:(id)reqId args:(NSDictionary *)args {
@@ -2604,9 +2681,7 @@ static NSString *MCPLogId(id reqId) {
 
     NSDictionary *info = [[AppManager sharedInstance] getFrontmostApp];
     NSDictionary *responseInfo = [self sanitizeFrontmostInfo:info debug:debug];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:responseInfo options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId structuredContent:responseInfo];
 }
 
 #pragma mark - MCP Response Sanitizers
@@ -2842,9 +2917,7 @@ static NSString *MCPLogId(id reqId) {
 
     if (payload) {
         NSDictionary *responsePayload = [self sanitizeUIElementsPayload:payload debug:debug];
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:responsePayload options:0 error:nil];
-        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-        return [self mcpSuccess:reqId text:jsonStr];
+        return [self mcpSuccess:reqId structuredContent:responsePayload];
     }
     NSDictionary *frontmostInfo = [[AccessibilityManager sharedInstance] frontmostApplicationInfo];
     NSDictionary *metadata = [frontmostInfo[@"metadata"] isKindOfClass:[NSDictionary class]] ? frontmostInfo[@"metadata"] : nil;
@@ -2881,9 +2954,7 @@ static NSString *MCPLogId(id reqId) {
         if (summary.count > 0) failurePayload[@"axRuntimeSummary"] = summary;
     }
     NSDictionary *responsePayload = [self sanitizeAccessibilityFailurePayload:failurePayload debug:debug];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:responsePayload options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr isError:YES];
+    return [self mcpSuccess:reqId structuredContent:responsePayload isError:YES];
 }
 
 - (NSDictionary *)executeGetElementAtPoint:(id)reqId args:(NSDictionary *)args {
@@ -2911,9 +2982,7 @@ static NSString *MCPLogId(id reqId) {
 
     if (element) {
         NSDictionary *responseElement = [self sanitizeElementAtPointPayload:element debug:debug];
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:responseElement options:0 error:nil];
-        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-        return [self mcpSuccess:reqId text:jsonStr];
+        return [self mcpSuccess:reqId structuredContent:responseElement];
     }
     NSDictionary *frontmostInfo = [[AccessibilityManager sharedInstance] frontmostApplicationInfo];
     NSDictionary *metadata = [frontmostInfo[@"metadata"] isKindOfClass:[NSDictionary class]] ? frontmostInfo[@"metadata"] : nil;
@@ -2951,9 +3020,7 @@ static NSString *MCPLogId(id reqId) {
         if (summary.count > 0) failurePayload[@"axRuntimeSummary"] = summary;
     }
     NSDictionary *responsePayload = [self sanitizeAccessibilityFailurePayload:failurePayload debug:debug];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:responsePayload options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr isError:YES];
+    return [self mcpSuccess:reqId structuredContent:responsePayload isError:YES];
 }
 
 #pragma mark - OCR / Screen Description
@@ -2989,7 +3056,7 @@ static NSString *MCPLogId(id reqId) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"OCR failed") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeDescribeScreen:(id)reqId args:(NSDictionary *)args {
@@ -3059,7 +3126,7 @@ static NSString *MCPLogId(id reqId) {
     }
 
     out[@"source"] = source;
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:out]];
+    return [self mcpSuccess:reqId structuredContent:out];
 }
 
 #pragma mark - Text Input Execution
@@ -3354,9 +3421,7 @@ static NSString *MCPLogId(id reqId) {
     }
 
     if (info) {
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
-        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-        return [self mcpSuccess:reqId text:jsonStr];
+        return [self mcpSuccess:reqId structuredContent:info];
     }
     return [self mcpSuccess:reqId text:@"Failed to get device info" isError:YES];
 }
@@ -3410,13 +3475,10 @@ static NSString *MCPLogId(id reqId) {
     if (runError.length > 0) {
         resultDict[@"error"] = runError;
     }
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:resultDict options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-
     if (!finished || exitCode != 0) {
-        return [self mcpSuccess:reqId text:jsonStr isError:YES];
+        return [self mcpSuccess:reqId structuredContent:resultDict isError:YES];
     }
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId structuredContent:resultDict];
 }
 
 #pragma mark - Brightness Execution
@@ -3486,9 +3548,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     }
 
     NSDictionary *result = @{@"brightness": @(brightness)};
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    return [self mcpSuccess:reqId text:jsonStr];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeSetBrightness:(id)reqId args:(NSDictionary *)args {
@@ -3566,9 +3626,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
 
     if (volume >= 0) {
         NSDictionary *result = @{@"volume": @(volume)};
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
-        NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-        return [self mcpSuccess:reqId text:jsonStr];
+        return [self mcpSuccess:reqId structuredContent:result];
     }
     return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Failed to get volume: %@", errMsg ?: @"unknown"] isError:YES];
 }
@@ -3676,13 +3734,21 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
 
 #pragma mark - Reverse-engineering Tool Execution
 
-// Serialize a dictionary result into pretty JSON text for the MCP text payload.
-- (NSString *)jsonTextForDictionary:(NSDictionary *)dict {
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict
+// Serialize structured results into pretty JSON text for older MCP clients.
+- (NSString *)jsonTextForObject:(id)object {
+    if (!object || ![NSJSONSerialization isValidJSONObject:object]) {
+        return @"{}";
+    }
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:object
                                                        options:NSJSONWritingPrettyPrinted
                                                          error:nil];
     NSString *text = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
     return text ?: @"{}";
+}
+
+// Serialize a dictionary result into pretty JSON text for the MCP text payload.
+- (NSString *)jsonTextForDictionary:(NSDictionary *)dict {
+    return [self jsonTextForObject:dict ?: @{}];
 }
 
 - (NSDictionary *)executeGetAppInfo:(id)reqId args:(NSDictionary *)args {
@@ -3697,7 +3763,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!info) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to read app info") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:info]];
+    return [self mcpSuccess:reqId structuredContent:info];
 }
 
 - (NSDictionary *)executeListDir:(id)reqId args:(NSDictionary *)args {
@@ -3712,7 +3778,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to list directory") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeReadFile:(id)reqId args:(NSDictionary *)args {
@@ -3735,7 +3801,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to read file") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeWriteFile:(id)reqId args:(NSDictionary *)args {
@@ -3758,7 +3824,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to write file") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeGetSyslog:(id)reqId args:(NSDictionary *)args {
@@ -3783,7 +3849,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to query system log") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeGetCrashLogs:(id)reqId args:(NSDictionary *)args {
@@ -3802,7 +3868,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to list crash logs") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 - (NSDictionary *)executeReadCrashLog:(id)reqId args:(NSDictionary *)args {
@@ -3817,7 +3883,7 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     if (!result) {
         return [self mcpSuccess:reqId text:(err ?: @"Failed to read crash log") isError:YES];
     }
-    return [self mcpSuccess:reqId text:[self jsonTextForDictionary:result]];
+    return [self mcpSuccess:reqId structuredContent:result];
 }
 
 #pragma mark - Response Builders
@@ -3827,8 +3893,26 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
 }
 
 - (NSDictionary *)mcpSuccess:(id)reqId text:(NSString *)text isError:(BOOL)isError {
+    return [self mcpSuccess:reqId text:text structuredContent:nil isError:isError];
+}
+
+- (NSDictionary *)mcpSuccess:(id)reqId structuredContent:(NSDictionary *)structuredContent {
+    return [self mcpSuccess:reqId structuredContent:structuredContent isError:NO];
+}
+
+- (NSDictionary *)mcpSuccess:(id)reqId structuredContent:(NSDictionary *)structuredContent isError:(BOOL)isError {
+    return [self mcpSuccess:reqId
+                       text:[self jsonTextForDictionary:structuredContent ?: @{}]
+          structuredContent:structuredContent
+                    isError:isError];
+}
+
+- (NSDictionary *)mcpSuccess:(id)reqId text:(NSString *)text structuredContent:(NSDictionary *)structuredContent isError:(BOOL)isError {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
-    result[@"content"] = @[@{@"type": @"text", @"text": text}];
+    result[@"content"] = @[@{@"type": @"text", @"text": text ?: @""}];
+    if ([structuredContent isKindOfClass:[NSDictionary class]]) {
+        result[@"structuredContent"] = structuredContent;
+    }
     if (isError) result[@"isError"] = @YES;
 
     return @{
@@ -3860,9 +3944,10 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
         @"Content-Type: application/json\r\n"
         @"Content-Length: %lu\r\n"
         @"Mcp-Session-Id: %@\r\n"
+        @"MCP-Protocol-Version: %@\r\n"
         @"Connection: close\r\n"
         @"\r\n",
-        status, (unsigned long)jsonData.length, _sessionId];
+        status, (unsigned long)jsonData.length, _sessionId, [self negotiatedProtocolVersion]];
 
     NSMutableData *responseData = [NSMutableData dataWithData:[response dataUsingEncoding:NSUTF8StringEncoding]];
     [responseData appendData:jsonData];
@@ -3897,9 +3982,10 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
         @"HTTP/1.1 %d %@\r\n"
         @"Content-Type: application/json\r\n"
         @"Content-Length: %lu\r\n"
+        @"MCP-Protocol-Version: %@\r\n"
         @"Connection: close\r\n"
         @"\r\n",
-        status, statusText, (unsigned long)jsonData.length];
+        status, statusText, (unsigned long)jsonData.length, [self negotiatedProtocolVersion]];
 
     NSMutableData *responseData = [NSMutableData dataWithData:[header dataUsingEncoding:NSUTF8StringEncoding]];
     [responseData appendData:jsonData];
@@ -3924,9 +4010,10 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
         @"Content-Type: application/json\r\n"
         @"Content-Length: %lu\r\n"
         @"Allow: %@\r\n"
+        @"MCP-Protocol-Version: %@\r\n"
         @"Connection: close\r\n"
         @"\r\n",
-        (unsigned long)jsonData.length, allowedMethods ?: @"POST"];
+        (unsigned long)jsonData.length, allowedMethods ?: @"POST", [self negotiatedProtocolVersion]];
 
     NSMutableData *responseData = [NSMutableData dataWithData:[header dataUsingEncoding:NSUTF8StringEncoding]];
     [responseData appendData:jsonData];
@@ -3946,9 +4033,10 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
         @"HTTP/1.1 %d Accepted\r\n"
         @"Content-Length: 0\r\n"
         @"Mcp-Session-Id: %@\r\n"
+        @"MCP-Protocol-Version: %@\r\n"
         @"Connection: close\r\n"
         @"\r\n",
-        status, _sessionId];
+        status, _sessionId, [self negotiatedProtocolVersion]];
 
     NSData *data = [response dataUsingEncoding:NSUTF8StringEncoding];
     if (requestLogId.length > 0) {

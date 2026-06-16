@@ -72,7 +72,7 @@ http://设备IP:8090/health
 3. 返回以下内容表示服务启动正常：
 
 ```json
-{"status":"ok","server":"ios-mcp","version":"1.2.0"}
+{"status":"ok","server":"ios-mcp","version":"1.2.0","protocolVersion":"2025-11-25","supportedProtocolVersions":["2025-11-25","2025-06-18","2025-03-26"]}
 ```
 
 ## 使用
@@ -93,6 +93,7 @@ curl 'http://设备IP:8090/download_file?path=/var/mobile/...' -o output.bin
 ## 安全说明
 
 - MCP 服务无内置认证，建议仅在局域网环境下使用
+- MCP 协议默认支持 `2025-11-25`，并兼容 `2025-06-18`、`2025-03-26`；HTTP 响应会返回 `MCP-Protocol-Version`
 - 锁屏或熄屏时，服务端会拦截点击、滑动、输入、启动 App、Shell 等交互/写入类工具，只放行状态查询、截图和唤醒恢复类工具
 - `run_command` 工具可执行任意 Shell 命令，请谨慎使用
 - `read_file` / `write_file` / `download_file` 可读写 MCP 服务进程权限范围内的设备路径，与 `run_command` 风险等级一致，请仅在可信网络使用
