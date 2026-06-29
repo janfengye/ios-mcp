@@ -45,6 +45,13 @@ typedef NS_ENUM(NSUInteger, TouchPhase) {
                 interval:(NSTimeInterval)intervalMs
               completion:(void (^)(BOOL success, NSString *error))completion;
 
+/// Simulate a drag and drop gesture (long press then move along a path)
+- (void)dragAlongPoints:(NSArray<NSValue *> *)points
+           holdDuration:(NSTimeInterval)holdMs
+           moveDuration:(NSTimeInterval)moveMs
+                  steps:(NSInteger)steps
+             completion:(void (^)(BOOL success, NSString *error))completion;
+
 /// Simulate a drag and drop gesture (long press then move to destination)
 - (void)dragFromPoint:(CGPoint)from
               toPoint:(CGPoint)to

@@ -89,9 +89,21 @@ static uint32_t IOSMCPCRC32(NSData *data) {
 }
 
 - (void)copyPrompt:(PSSpecifier *)specifier {
-    [UIPasteboard generalPasteboard].string = [self codexPrompt];
-    [self showAlertWithTitle:@"已复制"
-                     message:@"MCP 提示词片段已复制到剪贴板，粘贴到你的提示词中即可。"];
+    NSString *prompt = [self codexPrompt];
+    if (prompt.length == 0) {
+        [self showAlertWithTitle:@"分享失败" message:@"无法生成 MCP 提示词片段。"];
+        return;
+    }
+
+    [UIPasteboard generalPasteboard].string = prompt;
+    UITableViewCell *sourceCell = [self cachedCellForSpecifier:specifier];
+    [self deselectSpecifier:specifier];
+
+    [MCPLogger log:@"prefs_share_prompt copied chars=%lu", (unsigned long)prompt.length];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        [self presentPromptShareSheetWithText:prompt sourceCell:sourceCell];
+    });
 }
 
 - (void)shareDebugLogs:(PSSpecifier *)specifier {
@@ -188,7 +200,7 @@ static uint32_t IOSMCPCRC32(NSData *data) {
             }
 
             UITableViewCell *sourceCell = [self cachedCellForSpecifier:specifier];
-            [self deselectDebugLogSpecifier:specifier];
+            [self deselectSpecifier:specifier];
 
             if (zipped) {
                 NSURL *zipURL = [NSURL fileURLWithPath:zipPath];
@@ -364,7 +376,7 @@ static uint32_t IOSMCPCRC32(NSData *data) {
     return ok;
 }
 
-- (void)deselectDebugLogSpecifier:(PSSpecifier *)specifier {
+- (void)deselectSpecifier:(PSSpecifier *)specifier {
     if (![self respondsToSelector:@selector(indexPathForSpecifier:)]) {
         return;
     }
@@ -374,6 +386,51 @@ static uint32_t IOSMCPCRC32(NSData *data) {
     if (indexPath && tableView) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
     }
+}
+
+- (void)presentPromptShareSheetWithText:(NSString *)prompt sourceCell:(UITableViewCell *)sourceCell {
+    if (prompt.length == 0) {
+        [self showAlertWithTitle:@"分享失败" message:@"无法生成 MCP 提示词片段。"];
+        return;
+    }
+
+    UIActivityViewController *activityController =
+        [[UIActivityViewController alloc] initWithActivityItems:@[prompt]
+                                         applicationActivities:nil];
+    activityController.completionWithItemsHandler = ^(__unused UIActivityType activityType,
+                                                      BOOL completed,
+                                                      __unused NSArray *returnedItems,
+                                                      NSError *activityError) {
+        [MCPLogger log:@"prefs_share_prompt completed=%@ error=%@",
+         completed ? @"yes" : @"no",
+         activityError.localizedDescription ?: @"<nil>"];
+    };
+
+    UIViewController *presenter = self;
+    while (presenter.presentedViewController && !presenter.presentedViewController.isBeingDismissed) {
+        presenter = presenter.presentedViewController;
+    }
+
+    UIPopoverPresentationController *popover = activityController.popoverPresentationController;
+    if (popover) {
+        UIView *anchorView = (sourceCell && sourceCell.window) ? sourceCell.contentView : presenter.view;
+        popover.sourceView = anchorView;
+        popover.sourceRect = CGRectMake(CGRectGetMidX(anchorView.bounds),
+                                        CGRectGetMidY(anchorView.bounds),
+                                        1.0,
+                                        1.0);
+        popover.permittedArrowDirections = UIPopoverArrowDirectionAny;
+    }
+
+    [MCPLogger log:@"prefs_share_prompt presenting presenter=%@ popover=%@ chars=%lu",
+     NSStringFromClass([presenter class]),
+     popover ? @"yes" : @"no",
+     (unsigned long)prompt.length];
+    [presenter presentViewController:activityController
+                           animated:YES
+                         completion:^{
+        [MCPLogger log:@"prefs_share_prompt presentation_completed"];
+    }];
 }
 
 - (void)presentDebugLogShareSheetWithURL:(NSURL *)reportURL sourceCell:(UITableViewCell *)sourceCell {
@@ -680,36 +737,21 @@ static uint32_t IOSMCPCRC32(NSData *data) {
 
 - (NSString *)codexPrompt {
     return [NSString stringWithFormat:
-            @"你可以通过 iOS MCP 服务操作一台 iPhone 设备。\n\n"
+            @"你可以通过 iOS MCP 服务操作一台 iPhone 设备。各工具的功能和参数见工具列表，这里只列使用时容易踩的坑和约定。\n\n"
             @"MCP 地址: %@\n\n"
-            @"支持的操作:\n"
-            @"- 触控：点击、滑动、长按、双击、拖拽\n"
-            @"- 元素操作：tap_element 按文本/标签直接点击元素，wait_for_element/wait_for_disappear 等待元素出现或消失\n"
-            @"- 文字输入：快速粘贴输入、逐字键盘模拟、特殊键（回车、删除等）\n"
-            @"- 硬件按键：Home、电源、音量、静音\n"
-            @"- 唤醒/回到主屏：wake_and_home（锁屏或熄屏时优先使用）\n"
-            @"- 截图（screenshot 返回 MCP image content，不是 text；图片 base64 在 result.content[0].data，mimeType 通常是 image/jpeg）\n"
-            @"- 屏幕识别：ocr_screen 识别屏幕文字并返回坐标，describe_screen 一次返回前台 App+元素+可选 OCR/截图\n"
-            @"- App 管理：启动、关闭、列表、安装 IPA（无需签名）、卸载、get_app_info 查询沙盒/容器路径与 entitlements\n"
-            @"- UI 无障碍：获取当前页面节点树、坐标查询元素\n"
-            @"- 文件系统：list_dir 列目录、read_file 读文件、write_file 写文件（大文件用 GET /download_file 下载）\n"
-            @"- 日志：get_syslog 全 App 实时系统日志、get_crash_logs/read_crash_log 崩溃日志\n"
-            @"- 剪贴板：读写剪贴板内容\n"
-            @"- 设备控制：亮度、音量\n"
-            @"- 打开 URL 或 URL Scheme\n"
-            @"- Shell 命令执行\n"
-            @"- 设备信息：型号、iOS 版本、电池、存储、越狱方式\n\n"
-            @"操作规则:\n"
-            @"1. 开始前先获取当前前台 App、屏幕信息、UI 节点和必要截图（可用 describe_screen 一次获取）。\n"
-            @"2. 如果 get_screen_info 显示 locked=true/screen_on=false，或截图像锁屏，不要继续普通 App 操作；先调用 wake_and_home，或按电源后按 Home，或按两次 Home，然后重新截图确认。\n"
-            @"3. 服务端启用了锁屏保护；锁屏或熄屏时，点击、滑动、输入、启动 App、Shell 等交互/写入类工具会被拦截，只允许状态查询、截图和 wake_and_home 等恢复工具。\n"
-            @"4. 不要把单次 press_home 当成已经进入主屏幕；锁屏状态下一次 Home 通常只是唤醒或进入解锁提示。\n"
-            @"5. 交互时优先用 tap_element 按文本/标签点击，或根据 UI 节点坐标点击，不要盲点。\n"
-            @"6. 页面变化后重新读取 UI 节点，或用 wait_for_element 等待目标出现，再继续下一步。\n"
-            @"7. 如果 UI 节点抓不到目标（如游戏、Flutter/RN、Canvas 渲染页面），用 ocr_screen 识别文字坐标后再点击。\n"
+            @"使用注意事项:\n"
+            @"1. 开始操作前先用 describe_screen 了解当前屏：一次返回前台 App、可点元素和精确坐标，最省 token，是“看一眼当前屏”的默认入口。它默认不含截图和 OCR，需要时显式开 include_screenshot / include_ocr。\n"
+            @"2. 仅在需要细控时才下沉到底层读屏工具：要抓屏外/不可点节点、限制返回量、或排查“AX 为什么抓不到”时，用 get_ui_elements（visible_only / limit / debug）；AX 根本看不到的内容（游戏、Flutter/RN/Unity、Canvas、图片里的字），或只想识别某区域、快扫、指定语种时，用 ocr_screen（region / fast / languages）。\n"
+            @"3. screenshot 最占 token，仅在 AX 和 OCR 都拿不到、或确实需要看图时兜底，不要每步都截。处理结果按 image content 解析（图片 base64 在 result.content[0].data，mimeType 通常 image/jpeg），不要读 result.content[0].text。\n"
+            @"4. 以上读屏工具坐标统一为 screen points，OCR/AX 返回的点可直接传给 tap_screen / long_press，无需换算。\n"
+            @"5. 如果 get_screen_info 显示 locked=true/screen_on=false，或截图像锁屏，不要继续普通 App 操作；直接调用 wake_and_home 唤醒并回到主屏幕，然后用 get_screen_info/describe_screen（必要时 screenshot）确认（不要用单次 press_home 代替，锁屏下它通常只是唤醒或进入解锁提示）。\n"
+            @"6. 服务端启用了锁屏保护；锁屏或熄屏时，点击、滑动、输入、启动 App、Shell 等交互/写入类工具会被拦截，只允许状态查询、截图和 wake_and_home 等恢复工具。\n"
+            @"7. 交互时优先用 tap_element 按文本/标签点击，或根据 UI 节点坐标点击，不要盲点；页面变化后重新读取 UI 节点，或用 wait_for_element 等待目标出现，再继续下一步。\n"
             @"8. 文本输入先用 input_text；如果 input_text 失败、超时或返回 isError，立即用 type_text 输入同一段文本，不要反复调用 input_text。\n"
-            @"9. 健康检查不要使用 for i in {1..30}，因为某些 /bin/sh 不展开花括号。使用 while/seq，并设置 --connect-timeout 3 --max-time 5，例如：i=0; while [ $i -lt 30 ]; do r=$(curl -sS --connect-timeout 3 --max-time 5 %@ 2>/dev/null || true); [ -n \"$r\" ] && echo \"$r\" && exit 0; i=$((i+1)); sleep 1; done; echo health_timeout; exit 1\n"
-            @"10. 处理 screenshot 结果时，按 image content 解析，不要读取 result.content[0].text。",
+            @"9. read_file 有大小上限；读大文件或二进制文件改用 GET /download_file 下载完整文件。\n"
+            @"10. 安装 IPA/DEB：电脑本地文件先 POST /upload_file，再把返回的设备路径传给 install_app（IPA 可无需签名）；卸载时 App 传 bundle_id、DEB 传 package_id。\n"
+            @"11. install_app 装 DEB 只装本地 .deb，不会自动联网下载依赖；如有第三方依赖先上传并安装依赖包。\n"
+            @"12. DEB 安装/卸载成功后会重启 SpringBoard；之后先 sleep 几秒，再单次 curl 检测 /health 恢复，例如：curl -sS --connect-timeout 3 --max-time 5 %@。确需轮询用 while/seq，不要用 for i in {1..30} 这类花括号展开。",
             IOSMCPServiceURLString(),
             IOSMCPHealthURLString()];
 }

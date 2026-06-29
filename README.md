@@ -8,11 +8,11 @@ iOS MCP 是一个运行在越狱 iPhone 上的 [MCP (Model Context Protocol)](ht
 
 | 类别 | 工具 | 说明 |
 |------|------|------|
-| **触控手势** | `tap_screen` `swipe_screen` `long_press` `double_tap` `drag_and_drop` | 精确屏幕坐标操作 |
+| **触控手势** | `tap_screen` `swipe_screen` `long_press` `double_tap` `drag_and_drop` | 精确屏幕坐标操作，支持路径拖动 |
 | **硬件按键** | `press_home` `press_power` `press_volume_up` `press_volume_down` `toggle_mute` `wake_and_home` | HID 模拟物理按键，锁屏/熄屏唤醒 |
 | **文字输入** | `input_text` `type_text` `press_key` | 剪贴板快速输入 / HID 逐字模拟 / 特殊键 |
 | **截图** | `screenshot` `get_screen_info` | Base64 JPEG 截图、屏幕尺寸与方向 |
-| **App 管理** | `launch_app` `kill_app` `list_apps` `list_running_apps` `get_frontmost_app` `get_app_info` `install_app` `uninstall_app` | 启动/关闭/安装/卸载 App，查询 App 沙盒/容器路径与 entitlements |
+| **App 管理** | `launch_app` `kill_app` `list_apps` `list_running_apps` `get_frontmost_app` `get_app_info` `install_app` `uninstall_app` | 启动/关闭 App，安装/卸载 App 或 DEB，查询 App 沙盒/容器路径与 entitlements |
 | **无障碍 / 元素操作** | `get_ui_elements` `get_element_at_point` `tap_element` `wait_for_element` `wait_for_disappear` `ocr_screen` `describe_screen` | 获取 UI 节点树、坐标元素查询，按文本/标签点击元素、等待元素出现或消失，屏幕 OCR 文字识别与定位、聚合屏幕快照 |
 | **剪贴板** | `get_clipboard` `set_clipboard` | 读写剪贴板内容 |
 | **文件系统** | `list_dir` `read_file` `write_file` | 目录列举、文件读写（支持文本与二进制） |
@@ -72,7 +72,7 @@ http://设备IP:8090/health
 3. 返回以下内容表示服务启动正常：
 
 ```json
-{"status":"ok","server":"ios-mcp","version":"1.2.0","protocolVersion":"2025-11-25","supportedProtocolVersions":["2025-11-25","2025-06-18","2025-03-26"]}
+{"status":"ok","server":"ios-mcp","version":"1.2.1","protocolVersion":"2025-11-25","supportedProtocolVersions":["2025-11-25","2025-06-18","2025-03-26"]}
 ```
 
 ## 使用
@@ -98,7 +98,7 @@ curl 'http://设备IP:8090/download_file?path=/var/mobile/...' -o output.bin
 - `run_command` 工具可执行任意 Shell 命令，请谨慎使用
 - `read_file` / `write_file` / `download_file` 可读写 MCP 服务进程权限范围内的设备路径，与 `run_command` 风险等级一致，请仅在可信网络使用
 - `get_syslog` 通过 `mcp-logreader`（签 `com.apple.private.logging.stream` entitlement）读取全 App 实时日志，可能包含敏感信息，请仅在可信网络使用
-- `mcp-root` 提供 root 提权能力，仅限包内工具使用
+- `mcp-root` 提供受限 root 提权能力，仅允许包内工具、受限 chmod/launchctl、无参数 id，以及受限 `dpkg -i|--install|--unpack <绝对路径.deb>`、`dpkg -s|-r|--remove|--purge <package-id>`；它不是通用 sudo
 
 ## 社区交流
 

@@ -407,31 +407,42 @@ static void appendChildTouchEvent(IOHIDEventRef parent, TouchPhase phase, int in
 
 #pragma mark - Drag and Drop
 
-- (void)dragFromPoint:(CGPoint)from
-              toPoint:(CGPoint)to
-         holdDuration:(NSTimeInterval)holdMs
-         moveDuration:(NSTimeInterval)moveMs
-                steps:(NSInteger)steps
-           completion:(void (^)(BOOL, NSString *))completion {
+- (void)dragAlongPoints:(NSArray<NSValue *> *)points
+           holdDuration:(NSTimeInterval)holdMs
+           moveDuration:(NSTimeInterval)moveMs
+                  steps:(NSInteger)steps
+             completion:(void (^)(BOOL, NSString *))completion {
     dispatch_async(_hidQueue, ^{
         @try {
+            if (points.count < 2) {
+                if (completion) completion(NO, @"Drag path requires at least 2 points");
+                return;
+            }
+
             NSString *error = nil;
             NSTimeInterval hold = holdMs > 0 ? holdMs : 500;
             NSTimeInterval move = moveMs > 0 ? moveMs : 300;
             NSInteger totalSteps = steps > 0 ? steps : 20;
+            NSUInteger segmentCount = points.count - 1;
+            if (totalSteps < (NSInteger)segmentCount) {
+                totalSteps = (NSInteger)segmentCount;
+            }
+
+            CGPoint firstPoint = [points.firstObject CGPointValue];
+            CGPoint lastPoint = [points.lastObject CGPointValue];
 
             NSInteger holdSteps = (NSInteger)(hold / 50);
             if (holdSteps < 2) holdSteps = 2;
             useconds_t holdStepDelay = (useconds_t)((hold * 1000.0) / holdSteps);
 
-            if (![self performTouchAtPoint:from phase:TouchPhaseBegan error:&error]) {
+            if (![self performTouchAtPoint:firstPoint phase:TouchPhaseBegan error:&error]) {
                 if (completion) completion(NO, error);
                 return;
             }
             usleep(holdStepDelay);
 
             for (NSInteger i = 1; i <= holdSteps; i++) {
-                if (![self performTouchAtPoint:from phase:TouchPhaseMoved error:&error]) {
+                if (![self performTouchAtPoint:firstPoint phase:TouchPhaseMoved error:&error]) {
                     if (completion) completion(NO, error);
                     return;
                 }
@@ -441,24 +452,59 @@ static void appendChildTouchEvent(IOHIDEventRef parent, TouchPhase phase, int in
             }
 
             useconds_t moveStepDelay = (useconds_t)((move * 1000.0) / totalSteps);
+            NSMutableArray<NSNumber *> *segmentWeights = [NSMutableArray arrayWithCapacity:segmentCount];
+            CGFloat remainingWeight = 0;
+            for (NSUInteger i = 0; i < segmentCount; i++) {
+                CGPoint a = [points[i] CGPointValue];
+                CGPoint b = [points[i + 1] CGPointValue];
+                CGFloat dx = b.x - a.x;
+                CGFloat dy = b.y - a.y;
+                CGFloat weight = (dx >= 0 ? dx : -dx) + (dy >= 0 ? dy : -dy);
+                [segmentWeights addObject:@(weight)];
+                remainingWeight += weight;
+            }
 
-            for (NSInteger i = 1; i <= totalSteps; i++) {
-                CGFloat t = (CGFloat)i / (CGFloat)totalSteps;
-                CGPoint current = CGPointMake(
-                    from.x + (to.x - from.x) * t,
-                    from.y + (to.y - from.y) * t
-                );
-                if (![self performTouchAtPoint:current phase:TouchPhaseMoved error:&error]) {
-                    if (completion) completion(NO, error);
-                    return;
+            NSInteger remainingSteps = totalSteps;
+
+            for (NSUInteger segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++) {
+                CGPoint segmentStart = [points[segmentIndex] CGPointValue];
+                CGPoint segmentEnd = [points[segmentIndex + 1] CGPointValue];
+                NSInteger segmentsLeft = (NSInteger)(segmentCount - segmentIndex);
+                NSInteger segmentSteps = remainingSteps;
+                if (segmentsLeft > 1) {
+                    NSInteger minRemaining = segmentsLeft - 1;
+                    NSInteger maxForSegment = remainingSteps - minRemaining;
+                    if (remainingWeight > 0) {
+                        CGFloat weight = [segmentWeights[segmentIndex] doubleValue];
+                        segmentSteps = (NSInteger)((weight / remainingWeight) * remainingSteps + 0.5);
+                    } else {
+                        segmentSteps = remainingSteps / segmentsLeft;
+                    }
+                    if (segmentSteps < 1) segmentSteps = 1;
+                    if (segmentSteps > maxForSegment) segmentSteps = maxForSegment;
                 }
-                if (i < totalSteps) {
-                    usleep(moveStepDelay);
+
+                for (NSInteger i = 1; i <= segmentSteps; i++) {
+                    CGFloat t = (CGFloat)i / (CGFloat)segmentSteps;
+                    CGPoint current = CGPointMake(
+                        segmentStart.x + (segmentEnd.x - segmentStart.x) * t,
+                        segmentStart.y + (segmentEnd.y - segmentStart.y) * t
+                    );
+                    if (![self performTouchAtPoint:current phase:TouchPhaseMoved error:&error]) {
+                        if (completion) completion(NO, error);
+                        return;
+                    }
+                    if (remainingSteps > 1) {
+                        usleep(moveStepDelay);
+                    }
+                    remainingSteps--;
                 }
+
+                remainingWeight -= [segmentWeights[segmentIndex] doubleValue];
             }
 
             usleep(10000);
-            if (![self performTouchAtPoint:to phase:TouchPhaseEnded error:&error]) {
+            if (![self performTouchAtPoint:lastPoint phase:TouchPhaseEnded error:&error]) {
                 if (completion) completion(NO, error);
                 return;
             }
@@ -469,6 +515,23 @@ static void appendChildTouchEvent(IOHIDEventRef parent, TouchPhase phase, int in
             if (completion) completion(NO, exception.reason ?: exception.name ?: @"Drag dispatch exception");
         }
     });
+}
+
+- (void)dragFromPoint:(CGPoint)from
+              toPoint:(CGPoint)to
+         holdDuration:(NSTimeInterval)holdMs
+         moveDuration:(NSTimeInterval)moveMs
+                steps:(NSInteger)steps
+           completion:(void (^)(BOOL, NSString *))completion {
+    NSArray<NSValue *> *points = @[
+        [NSValue valueWithCGPoint:from],
+        [NSValue valueWithCGPoint:to],
+    ];
+    [self dragAlongPoints:points
+             holdDuration:holdMs
+             moveDuration:moveMs
+                    steps:steps
+               completion:completion];
 }
 
 @end

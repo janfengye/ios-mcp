@@ -80,7 +80,7 @@
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>复制 MCP 提示词片段</string>
+			<string>复制并分享 MCP 提示词片段</string>
 		</dict>
 		<dict>
 			<key>cell</key>

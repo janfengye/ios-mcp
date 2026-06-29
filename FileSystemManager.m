@@ -28,9 +28,9 @@ static const NSUInteger kFSHardMaxReadBytes = 4 * 1024 * 1024;
 // NOTE: file operations run in-process (the MCP server lives inside SpringBoard, which
 // already has broad read access to other apps' containers and system paths). There is no
 // shell/mcp-root fallback: the bundled setuid mcp-root helper only whitelists a fixed set
-// of commands (mcp-roothelper/mcp-appinst/mcp-ldid/chmod/launchctl) and rejects /bin/sh,
-// so a privileged shell fallback could never run anyway. When direct access is denied we
-// report the underlying errno honestly rather than pretend to elevate.
+// of commands and rejects /bin/sh, so a privileged shell fallback could never run anyway.
+// When direct access is denied we report the underlying errno honestly rather than pretend
+// to elevate.
 static NSString *FSResolvePath(NSString *path) {
     if (path.length == 0) return @"";
     NSString *resolved = MCPResolvedJailbreakPath(path);

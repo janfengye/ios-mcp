@@ -8,11 +8,11 @@ iOS MCP is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) se
 
 | Category | Tools | Description |
 |----------|-------|-------------|
-| **Touch** | `tap_screen` `swipe_screen` `long_press` `double_tap` `drag_and_drop` | Precise screen coordinate operations |
+| **Touch** | `tap_screen` `swipe_screen` `long_press` `double_tap` `drag_and_drop` | Precise screen coordinate operations with path dragging |
 | **Buttons** | `press_home` `press_power` `press_volume_up` `press_volume_down` `toggle_mute` `wake_and_home` | HID physical button simulation, lock/off-screen wake flow |
 | **Text Input** | `input_text` `type_text` `press_key` | Pasteboard fast input / HID character-by-character / special keys |
 | **Screenshot** | `screenshot` `get_screen_info` | Base64 JPEG screenshot, screen dimensions & orientation |
-| **App Management** | `launch_app` `kill_app` `list_apps` `list_running_apps` `get_frontmost_app` `get_app_info` `install_app` `uninstall_app` | Launch/kill/install/uninstall apps, query app bundle/container paths and entitlements |
+| **App Management** | `launch_app` `kill_app` `list_apps` `list_running_apps` `get_frontmost_app` `get_app_info` `install_app` `uninstall_app` | Launch/kill apps, install/uninstall apps or DEB packages, query app bundle/container paths and entitlements |
 | **Accessibility / Elements** | `get_ui_elements` `get_element_at_point` `tap_element` `wait_for_element` `wait_for_disappear` `ocr_screen` `describe_screen` | UI element tree, element lookup by coordinates, tap elements by text/label, wait for elements to appear/disappear, on-screen OCR text recognition with coordinates, aggregated screen snapshot |
 | **Clipboard** | `get_clipboard` `set_clipboard` | Read/write clipboard |
 | **Filesystem** | `list_dir` `read_file` `write_file` | Directory listing, file read/write (text and binary) |
@@ -72,7 +72,7 @@ http://DEVICE_IP:8090/health
 3. If you get the following response, the service is running correctly:
 
 ```json
-{"status":"ok","server":"ios-mcp","version":"1.2.0","protocolVersion":"2025-11-25","supportedProtocolVersions":["2025-11-25","2025-06-18","2025-03-26"]}
+{"status":"ok","server":"ios-mcp","version":"1.2.1","protocolVersion":"2025-11-25","supportedProtocolVersions":["2025-11-25","2025-06-18","2025-03-26"]}
 ```
 
 ## Usage
@@ -97,7 +97,7 @@ curl 'http://device-ip:8090/download_file?path=/var/mobile/...' -o output.bin
 - The `run_command` tool can execute arbitrary shell commands — use with caution
 - `read_file` / `write_file` / `download_file` can read and write device paths within the MCP server process's permission scope, at the same risk level as `run_command` — use only on trusted networks
 - `get_syslog` reads the live system-wide log of all apps via `mcp-logreader` (signed with the `com.apple.private.logging.stream` entitlement), which may contain sensitive data — use only on trusted networks
-- `mcp-root` provides root privilege elevation, intended for internal use only
+- `mcp-root` provides restricted root privilege elevation for bundled helpers, limited chmod/launchctl, no-argument id, and restricted `dpkg -i|--install|--unpack <absolute .deb path>` / `dpkg -s|-r|--remove|--purge <package-id>` operations; it is not a general sudo replacement
 
 ## Community
 

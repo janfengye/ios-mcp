@@ -544,7 +544,7 @@
                 "upload_file"
               ]
             },
-            "description": "Upload any local file to the device as raw bytes. For IPA install, set sample_upload_file_path and sample_upload_filename, send this request, then pass uploaded_file_path to install_app. The response contains only path, filename, and size."
+            "description": "Upload any local file to the device as raw bytes. For IPA or DEB install, set sample_upload_file_path and sample_upload_filename, send this request, then pass uploaded_file_path to install_app. The response contains only path, filename, and size."
           }
         }
       ]
@@ -735,7 +735,7 @@
                 "mcp"
               ]
             },
-            "description": "Install an IPA already on the device. For a computer-local IPA, first send File Transfer / upload_file and then use the uploaded_file_path environment value here."
+            "description": "Install an IPA or DEB already on the device. For a computer-local file, first send File Transfer / upload_file and then use the uploaded_file_path environment value here. DEB installs restart SpringBoard after dpkg succeeds."
           }
         },
         {
@@ -766,7 +766,7 @@
                 "mcp"
               ]
             },
-            "description": "Uninstall an app by bundle identifier. Disruptive."
+            "description": "Uninstall an app by bundle_id or a DEB package by package_id. DEB removals restart SpringBoard after dpkg succeeds. Disruptive."
           }
         }
       ]
@@ -1013,7 +1013,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": \"{{current_request_id}}\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"drag_and_drop\",\n    \"arguments\": {\n      \"fromX\": {{sample_x}},\n      \"fromY\": {{sample_y}},\n      \"toX\": {{sample_to_x}},\n      \"toY\": {{sample_to_y}},\n      \"hold_duration\": {{sample_long_press_duration_ms}},\n      \"move_duration\": {{sample_swipe_duration_ms}},\n      \"steps\": {{sample_steps}}\n    }\n  }\n}",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": \"{{current_request_id}}\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"drag_and_drop\",\n    \"arguments\": {\n      \"points\": [\n        {\"x\": {{sample_x}}, \"y\": {{sample_y}}},\n        {\"x\": {{sample_to_x}}, \"y\": {{sample_y}}},\n        {\"x\": {{sample_to_x}}, \"y\": {{sample_to_y}}}\n      ],\n      \"hold_duration\": {{sample_long_press_duration_ms}},\n      \"move_duration\": {{sample_swipe_duration_ms}},\n      \"steps\": {{sample_steps}}\n    }\n  }\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1029,7 +1029,7 @@
                 "mcp"
               ]
             },
-            "description": "Drag from one point to another using the HID event path."
+            "description": "Drag along a point path using the HID event path, releasing at the last point."
           }
         },
         {

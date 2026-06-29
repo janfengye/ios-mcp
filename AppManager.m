@@ -9,6 +9,8 @@
 #import <objc/message.h>
 #import "IOSMCPPreferences.h"
 #import "MCPLogger.h"
+#import <spawn.h>
+#import <string.h>
 #import <sys/stat.h>
 
 typedef struct __SecCode const *SecStaticCodeRef;
@@ -108,6 +110,78 @@ static NSString *MCPAppLogRedactedText(NSString *text) {
         result = [[result substringToIndex:256] stringByAppendingString:@"...<truncated>"];
     }
     return result;
+}
+
+static NSString *MCPSpringBoardKillallPath(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *candidate in @[
+        MCPResolvedJailbreakPath(@"/usr/bin/killall"),
+        MCPResolvedJailbreakPath(@"/bin/killall"),
+        @"/usr/bin/killall",
+        @"/bin/killall"
+    ]) {
+        if (candidate.length && [fm isExecutableFileAtPath:candidate]) {
+            return candidate;
+        }
+    }
+    return nil;
+}
+
+static BOOL MCPScheduleSpringBoardRestart(NSString **error) {
+    NSString *killallPath = MCPSpringBoardKillallPath();
+    if (!killallPath.length) {
+        if (error) *error = @"killall executable not found";
+        return NO;
+    }
+
+    NSString *spawnPath = [killallPath copy];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(800 * NSEC_PER_MSEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        pid_t pid = 0;
+        char *const argv[] = {"killall", "-9", "SpringBoard", NULL};
+        int status = posix_spawn(&pid, spawnPath.fileSystemRepresentation, NULL, NULL, argv, NULL);
+        if (status != 0) {
+            APP_LOG(@"Failed to spawn SpringBoard restart via %@: %s", MCPAppLogSafePath(spawnPath), strerror(status));
+            return;
+        }
+        APP_LOG(@"Scheduled SpringBoard restart pid=%d", pid);
+    });
+    return YES;
+}
+
+static BOOL MCPDebPackageIdIsSafe(NSString *packageId) {
+    if (![packageId isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+
+    const char *utf8 = packageId.UTF8String;
+    if (!utf8) {
+        return NO;
+    }
+
+    size_t length = strlen(utf8);
+    if (length == 0 || length > 128 || length != [packageId lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) {
+        return NO;
+    }
+
+    unsigned char first = (unsigned char)utf8[0];
+    if (!((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') || (first >= '0' && first <= '9'))) {
+        return NO;
+    }
+
+    for (size_t i = 1; i < length; i++) {
+        unsigned char ch = (unsigned char)utf8[i];
+        BOOL allowed = ((ch >= 'A' && ch <= 'Z') ||
+                        (ch >= 'a' && ch <= 'z') ||
+                        (ch >= '0' && ch <= '9') ||
+                        ch == '+' ||
+                        ch == '-' ||
+                        ch == '.');
+        if (!allowed) {
+            return NO;
+        }
+    }
+
+    return YES;
 }
 
 static NSUInteger MCPAppLogUTF8Length(NSString *text) {
@@ -1389,19 +1463,78 @@ static BOOL MCPWaitForURLOpenVerification(NSURL *url, NSString *previousBundleId
 
 #pragma mark - Install App
 
-- (BOOL)installApp:(NSString *)ipaPath error:(NSString **)error {
-    if (!ipaPath.length) {
-        if (error) *error = @"Empty IPA path";
+- (BOOL)installDebPackage:(NSString *)debPath error:(NSString **)error {
+    if (![debPath.pathExtension.lowercaseString isEqualToString:@"deb"]) {
+        if (error) *error = @"DEB install requires a .deb file";
+        return NO;
+    }
+    if (!debPath.isAbsolutePath) {
+        if (error) *error = @"DEB install requires an absolute device path";
         return NO;
     }
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:ipaPath]) {
-        if (error) *error = [NSString stringWithFormat:@"File not found: %@", ipaPath];
+    NSString *mcpRootPath = MCPResolvedJailbreakPath(@"/usr/bin/mcp-root");
+    if (![fm isExecutableFileAtPath:mcpRootPath]) {
+        if (error) *error = @"mcp-root executable not found; DEB install requires the bundled root helper";
+        return NO;
+    }
+
+    APP_LOG(@"Installing DEB via mcp-root -> dpkg: %@", MCPAppLogSafePath(debPath));
+    NSString *output = nil;
+    NSString *spawnError = nil;
+    int exitCode = -1;
+    BOOL finished = MCPRunProcess(mcpRootPath,
+                                  @[@"/usr/bin/dpkg", @"-i", debPath],
+                                  MCPJailbreakEnvironment(),
+                                  180,
+                                  512 * 1024,
+                                  &output,
+                                  &exitCode,
+                                  &spawnError);
+    if (!finished || exitCode != 0) {
+        APP_LOG(@"dpkg install failed (spawnError=%@ exit=%d outputBytes=%lu)",
+                MCPAppLogRedactedText(spawnError ?: @"none"),
+                exitCode,
+                (unsigned long)MCPAppLogUTF8Length(output));
+        NSString *details = output.length > 0 ? output : (spawnError ?: @"unknown error");
+        if (error) *error = [NSString stringWithFormat:@"dpkg install failed: %@", details];
+        return NO;
+    }
+
+    APP_LOG(@"dpkg install succeeded outputBytes=%lu", (unsigned long)MCPAppLogUTF8Length(output));
+    NSString *restartError = nil;
+    if (!MCPScheduleSpringBoardRestart(&restartError)) {
+        if (error) *error = [NSString stringWithFormat:@"DEB installed but failed to schedule SpringBoard restart: %@", restartError ?: @"unknown error"];
+        return NO;
+    }
+
+    return YES;
+}
+
+- (BOOL)installApp:(NSString *)packagePath error:(NSString **)error {
+    if (!packagePath.length) {
+        if (error) *error = @"Empty package path";
+        return NO;
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:packagePath]) {
+        if (error) *error = [NSString stringWithFormat:@"File not found: %@", packagePath];
+        return NO;
+    }
+
+    NSString *extension = packagePath.pathExtension.lowercaseString ?: @"";
+    if ([extension isEqualToString:@"deb"]) {
+        return [self installDebPackage:packagePath error:error];
+    }
+    if (![extension isEqualToString:@"ipa"]) {
+        if (error) *error = [NSString stringWithFormat:@"Unsupported package extension: .%@ (expected .ipa or .deb)", extension.length ? extension : @"<none>"];
         return NO;
     }
 
     NSDate *installStartedAt = [NSDate date];
+    NSString *ipaPath = packagePath;
     NSString *ipaBundleId = [self bundleIdFromIPA:ipaPath];
 
 #ifdef MCP_ROOTHIDE
@@ -1851,15 +1984,108 @@ static BOOL MCPWaitForURLOpenVerification(NSURL *url, NSString *previousBundleId
     return result;
 }
 
+- (BOOL)debPackageInstalled:(NSString *)packageId mcpRootPath:(NSString *)mcpRootPath statusOutput:(NSString **)statusOutput error:(NSString **)error {
+    NSString *output = nil;
+    NSString *spawnError = nil;
+    int exitCode = -1;
+    BOOL finished = MCPRunProcess(mcpRootPath,
+                                  @[@"/usr/bin/dpkg", @"-s", packageId],
+                                  MCPJailbreakEnvironment(),
+                                  30,
+                                  128 * 1024,
+                                  &output,
+                                  &exitCode,
+                                  &spawnError);
+    if (statusOutput) *statusOutput = output;
+
+    if (!finished) {
+        APP_LOG(@"dpkg status failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
+                packageId,
+                MCPAppLogRedactedText(spawnError ?: @"none"),
+                exitCode,
+                (unsigned long)MCPAppLogUTF8Length(output));
+        if (error) *error = spawnError ?: @"dpkg status failed";
+        return NO;
+    }
+
+    if (exitCode != 0) {
+        return NO;
+    }
+
+    return [output rangeOfString:@"Status: install ok installed"].location != NSNotFound;
+}
+
+- (BOOL)uninstallDebPackage:(NSString *)packageId error:(NSString **)error {
+    if (!MCPDebPackageIdIsSafe(packageId)) {
+        if (error) *error = [NSString stringWithFormat:@"Invalid DEB package id: %@", packageId ?: @"<nil>"];
+        return NO;
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *mcpRootPath = MCPResolvedJailbreakPath(@"/usr/bin/mcp-root");
+    if (![fm isExecutableFileAtPath:mcpRootPath]) {
+        if (error) *error = @"mcp-root executable not found; DEB uninstall requires the bundled root helper";
+        return NO;
+    }
+
+    NSString *statusOutput = nil;
+    NSString *statusError = nil;
+    if (![self debPackageInstalled:packageId mcpRootPath:mcpRootPath statusOutput:&statusOutput error:&statusError]) {
+        if (error) {
+            NSString *details = statusError.length ? statusError : statusOutput;
+            *error = details.length > 0 ?
+                [NSString stringWithFormat:@"DEB package not installed: %@ (%@)", packageId, MCPAppLogRedactedText(details)] :
+                [NSString stringWithFormat:@"DEB package not installed: %@", packageId];
+        }
+        return NO;
+    }
+
+    APP_LOG(@"Uninstalling DEB via mcp-root -> dpkg: %@", packageId);
+    NSString *output = nil;
+    NSString *spawnError = nil;
+    int exitCode = -1;
+    BOOL finished = MCPRunProcess(mcpRootPath,
+                                  @[@"/usr/bin/dpkg", @"-r", packageId],
+                                  MCPJailbreakEnvironment(),
+                                  180,
+                                  512 * 1024,
+                                  &output,
+                                  &exitCode,
+                                  &spawnError);
+    if (!finished || exitCode != 0) {
+        APP_LOG(@"dpkg remove failed for %@ (spawnError=%@ exit=%d outputBytes=%lu)",
+                packageId,
+                MCPAppLogRedactedText(spawnError ?: @"none"),
+                exitCode,
+                (unsigned long)MCPAppLogUTF8Length(output));
+        NSString *details = output.length > 0 ? output : (spawnError ?: @"unknown error");
+        if (error) *error = [NSString stringWithFormat:@"dpkg remove failed: %@", details];
+        return NO;
+    }
+
+    if ([self debPackageInstalled:packageId mcpRootPath:mcpRootPath statusOutput:nil error:nil]) {
+        if (error) *error = [NSString stringWithFormat:@"dpkg remove completed but package is still installed: %@", packageId];
+        return NO;
+    }
+
+    APP_LOG(@"dpkg remove succeeded outputBytes=%lu", (unsigned long)MCPAppLogUTF8Length(output));
+    NSString *restartError = nil;
+    if (!MCPScheduleSpringBoardRestart(&restartError)) {
+        if (error) *error = [NSString stringWithFormat:@"DEB removed but failed to schedule SpringBoard restart: %@", restartError ?: @"unknown error"];
+        return NO;
+    }
+
+    return YES;
+}
+
 - (BOOL)uninstallApp:(NSString *)bundleId error:(NSString **)error {
     if (!bundleId.length) {
-        if (error) *error = @"Empty bundle ID";
+        if (error) *error = @"Empty app or package identifier";
         return NO;
     }
 
     if (![self isAppInstalled:bundleId]) {
-        if (error) *error = [NSString stringWithFormat:@"App not found: %@", bundleId];
-        return NO;
+        return [self uninstallDebPackage:bundleId error:error];
     }
 
     __block BOOL ok = NO;

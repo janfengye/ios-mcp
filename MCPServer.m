@@ -30,7 +30,7 @@
 #define MCP_PROTOCOL_VERSION_LATEST @"2025-11-25"
 #define MCP_PROTOCOL_VERSION_LEGACY @"2025-03-26"
 #define MCP_SERVER_NAME             @"ios-mcp"
-#define MCP_SERVER_VERSION          @"1.2.0"
+#define MCP_SERVER_VERSION          @"1.2.1"
 #define HTTP_BUF_SIZE        (256 * 1024)
 #define MCP_MAX_CHUNK_LINE   (8 * 1024)
 #define MCP_UPLOAD_DIR       @"/tmp/ios-mcp-uploads"
@@ -71,6 +71,95 @@ static BOOL MCPNumberFromArgs(NSDictionary *args, NSString *key, double defaultV
 
     if (outError) *outError = [NSString stringWithFormat:@"Invalid parameter %@: expected number", key];
     return NO;
+}
+
+static BOOL MCPDoubleFromValue(id value, NSString *parameterName, double *outValue, NSString **outError) {
+    if (!value || value == [NSNull null]) {
+        if (outError) *outError = [NSString stringWithFormat:@"Missing required parameter: %@", parameterName];
+        return NO;
+    }
+
+    if ([value isKindOfClass:[NSNumber class]]) {
+        if (outValue) *outValue = [value doubleValue];
+        return YES;
+    }
+
+    if ([value isKindOfClass:[NSString class]]) {
+        NSScanner *scanner = [NSScanner scannerWithString:(NSString *)value];
+        double parsed = 0;
+        if ([scanner scanDouble:&parsed] && scanner.isAtEnd) {
+            if (outValue) *outValue = parsed;
+            return YES;
+        }
+    }
+
+    if (outError) *outError = [NSString stringWithFormat:@"Invalid parameter %@: expected number", parameterName];
+    return NO;
+}
+
+static BOOL MCPPointFromValue(id value, NSUInteger index, CGPoint *outPoint, NSString **outError) {
+    double x = 0;
+    double y = 0;
+    NSString *xName = [NSString stringWithFormat:@"points[%lu].x", (unsigned long)index];
+    NSString *yName = [NSString stringWithFormat:@"points[%lu].y", (unsigned long)index];
+
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)value;
+        if (!MCPDoubleFromValue(dict[@"x"], xName, &x, outError) ||
+            !MCPDoubleFromValue(dict[@"y"], yName, &y, outError)) {
+            return NO;
+        }
+        if (outPoint) *outPoint = CGPointMake(x, y);
+        return YES;
+    }
+
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSArray *array = (NSArray *)value;
+        if (array.count < 2) {
+            if (outError) *outError = [NSString stringWithFormat:@"Invalid parameter points[%lu]: expected object with x/y or [x, y]", (unsigned long)index];
+            return NO;
+        }
+        if (!MCPDoubleFromValue(array[0], xName, &x, outError) ||
+            !MCPDoubleFromValue(array[1], yName, &y, outError)) {
+            return NO;
+        }
+        if (outPoint) *outPoint = CGPointMake(x, y);
+        return YES;
+    }
+
+    if (outError) *outError = [NSString stringWithFormat:@"Invalid parameter points[%lu]: expected object with x/y or [x, y]", (unsigned long)index];
+    return NO;
+}
+
+static BOOL MCPPointArrayFromArgs(NSDictionary *args, NSString *key, NSArray<NSValue *> **outPoints, NSString **outError) {
+    id value = args[key];
+    if (!value || value == [NSNull null]) {
+        if (outPoints) *outPoints = nil;
+        return YES;
+    }
+
+    if (![value isKindOfClass:[NSArray class]]) {
+        if (outError) *outError = [NSString stringWithFormat:@"Invalid parameter %@: expected array of points", key];
+        return NO;
+    }
+
+    NSArray *array = (NSArray *)value;
+    if (array.count < 2) {
+        if (outError) *outError = [NSString stringWithFormat:@"Invalid parameter %@: expected at least 2 points", key];
+        return NO;
+    }
+
+    NSMutableArray<NSValue *> *points = [NSMutableArray arrayWithCapacity:array.count];
+    for (NSUInteger i = 0; i < array.count; i++) {
+        CGPoint point = CGPointZero;
+        if (!MCPPointFromValue(array[i], i, &point, outError)) {
+            return NO;
+        }
+        [points addObject:[NSValue valueWithCGPoint:point]];
+    }
+
+    if (outPoints) *outPoints = points;
+    return YES;
 }
 
 static BOOL MCPStringFromArgs(NSDictionary *args, NSString *key, BOOL required, NSString **outValue, NSString **outError) {
@@ -1480,7 +1569,7 @@ static NSString *MCPLogId(id reqId) {
                     @"httpHeader": @"MCP-Protocol-Version"
                 }
             },
-            @"instructions": @"Use ios-mcp to inspect and operate the connected iPhone.\n\nGetting started: call get_frontmost_app, get_screen_info, get_ui_elements, and screenshot to understand the current device state. get_screen_info includes device_state when SpringBoard exposes it. If locked is true, screen_on is false, the screenshot looks like the Lock Screen, or UI elements are from SpringBoard/Lock Screen, do not continue normal app automation until the device is awake/unlocked.\n\nLock screen handling: a single press_home only wakes or advances the Lock Screen and must not be treated as reaching the Home screen. Use wake_and_home when the device may be locked/off. The equivalent manual sequence is Power then Home when the screen is off, or Home twice when the Lock Screen is already visible. After wake_and_home, verify with screenshot/get_ui_elements/get_frontmost_app before continuing. The server enforces a lock guard: while locked or screen_off, interactive and mutating tools are blocked; only observation and recovery tools are allowed.\n\nTouch and gestures: use screen point coordinates for tap_screen, swipe_screen, long_press, double_tap, and drag_and_drop. For Flutter or custom-rendered apps, accessibility may expose only a container such as FlutterView; use screenshot plus coordinates in that case.\n\nText input: use input_text first for fast bulk text through system keyboard events. If input_text returns isError or reports failure/timeout, immediately retry the same text with type_text; do not repeat input_text. Use type_text for character-by-character input and press_key for special keys (enter, delete, tab, etc.).\n\nHardware buttons: press_home, press_power, press_volume_up, press_volume_down, toggle_mute, wake_and_home.\n\nClipboard: get_clipboard and set_clipboard to read/write clipboard contents.\n\nScreenshot: the screenshot tool returns MCP image content, not text — result.content[0].data contains the base64 JPEG payload and result.content[0].mimeType is usually image/jpeg.\n\nApp management: launch_app, kill_app, list_apps, list_running_apps, get_frontmost_app. launch_app waits until the target app is actually frontmost before returning, so do not immediately re-issue redundant foreground checks unless you need to verify a later transition. To install an app from the computer, first upload raw IPA bytes to POST /upload_file (for example: curl -H 'X-Filename: app.ipa' --data-binary @app.ipa http://device-ip:8090/upload_file). The upload response returns a device path; pass that path to install_app. To install an IPA already on the phone, call install_app directly with its device path. Unsigned or fakesigned IPAs are supported. To uninstall: use list_apps to find the bundle_id, then call uninstall_app.\n\nDevice control: get_brightness/set_brightness, get_volume/set_volume, open_url (supports http/https and URL schemes like tel://, prefs:root=WIFI, etc.).\n\nDevice info: get_device_info for model, iOS version, battery, storage, memory, and jailbreak type/package information. Pass debug=true only when diagnosing installation integrity to include bundled helper executable status.\n\nHealth checks: avoid shell brace expansion such as for i in {1..30}; ios-mcp commands often run under /bin/sh where that may execute only once. Use seq or a while loop, and use at least --connect-timeout 3 plus --max-time 5 for /health.\n\nShell: run_command to execute shell commands on the device (timeout default 10s, max 30s).\n\nReverse engineering and debugging: get_app_info returns an installed app's bundle path, data container (sandbox) path, App Group container paths, executable path, version, and entitlements — call it first to locate files. list_dir, read_file, and write_file operate on the device filesystem and fall back to the privileged mcp-root helper for protected paths (other apps' sandboxes, system dirs). read_file returns utf8 for text and base64 for binary; it is capped (default 512KB), so for large or binary files use GET /download_file?path=<device-path> to stream the full file (for example: curl 'http://device-ip:8090/download_file?path=/var/mobile/...' -o out.bin). get_syslog captures the live unified system log across all processes (the stream Console.app shows) for a few seconds — it is a live capture, so trigger the activity you want to observe during the window. get_crash_logs lists crash reports (filter by bundle_id), and read_crash_log returns a single report's full text. write_file is blocked while the device is locked or the screen is off."
+            @"instructions": @"Use ios-mcp to inspect and operate the connected iPhone.\n\nGetting started: call get_frontmost_app, get_screen_info, get_ui_elements, and screenshot to understand the current device state. get_screen_info includes device_state when SpringBoard exposes it. If locked is true, screen_on is false, the screenshot looks like the Lock Screen, or UI elements are from SpringBoard/Lock Screen, do not continue normal app automation until the device is awake/unlocked.\n\nLock screen handling: a single press_home only wakes or advances the Lock Screen and must not be treated as reaching the Home screen. Use wake_and_home when the device may be locked/off. The equivalent manual sequence is Power then Home when the screen is off, or Home twice when the Lock Screen is already visible. After wake_and_home, verify with screenshot/get_ui_elements/get_frontmost_app before continuing. The server enforces a lock guard: while locked or screen_off, interactive and mutating tools are blocked; only observation and recovery tools are allowed.\n\nTouch and gestures: use screen point coordinates for tap_screen, swipe_screen, long_press, double_tap, and drag_and_drop. drag_and_drop accepts either fromX/fromY/toX/toY for a straight drag, or points for a path where the first point is pressed and the last point is released. For Flutter or custom-rendered apps, accessibility may expose only a container such as FlutterView; use screenshot plus coordinates in that case.\n\nText input: use input_text first for fast bulk text through system keyboard events. If input_text returns isError or reports failure/timeout, immediately retry the same text with type_text; do not repeat input_text. Use type_text for character-by-character input and press_key for special keys (enter, delete, tab, etc.).\n\nHardware buttons: press_home, press_power, press_volume_up, press_volume_down, toggle_mute, wake_and_home.\n\nClipboard: get_clipboard and set_clipboard to read/write clipboard contents.\n\nScreenshot: the screenshot tool returns MCP image content, not text — result.content[0].data contains the base64 JPEG payload and result.content[0].mimeType is usually image/jpeg.\n\nApp management: launch_app, kill_app, list_apps, list_running_apps, get_frontmost_app. launch_app waits until the target app is actually frontmost before returning, so do not immediately re-issue redundant foreground checks unless you need to verify a later transition. To install an IPA or DEB from the computer, first upload raw file bytes to POST /upload_file (for example: curl -H 'X-Filename: app.ipa' --data-binary @app.ipa http://device-ip:8090/upload_file or curl -H 'X-Filename: package.deb' --data-binary @package.deb http://device-ip:8090/upload_file). The upload response returns a device path; pass that path to install_app. To install an IPA or DEB already on the phone, call install_app directly with its device path. Unsigned or fakesigned IPAs are supported. DEB installs use dpkg and restart SpringBoard after installation succeeds. To uninstall an app, use list_apps to find the bundle_id, then call uninstall_app. To uninstall a DEB package, call uninstall_app with package_id; DEB removal uses dpkg and restarts SpringBoard after success.\n\nDevice control: get_brightness/set_brightness, get_volume/set_volume, open_url (supports http/https and URL schemes like tel://, prefs:root=WIFI, etc.).\n\nDevice info: get_device_info for model, iOS version, battery, storage, memory, and jailbreak type/package information. Pass debug=true only when diagnosing installation integrity to include bundled helper executable status.\n\nHealth checks: avoid shell brace expansion such as for i in {1..30}; ios-mcp commands often run under /bin/sh where that may execute only once. Use seq or a while loop, and use at least --connect-timeout 3 plus --max-time 5 for /health.\n\nShell: run_command to execute shell commands on the device (timeout default 10s, max 30s).\n\nReverse engineering and debugging: get_app_info returns an installed app's bundle path, data container (sandbox) path, App Group container paths, executable path, version, and entitlements — call it first to locate files. list_dir, read_file, and write_file operate on the device filesystem and fall back to the privileged mcp-root helper for protected paths (other apps' sandboxes, system dirs). read_file returns utf8 for text and base64 for binary; it is capped (default 512KB), so for large or binary files use GET /download_file?path=<device-path> to stream the full file (for example: curl 'http://device-ip:8090/download_file?path=/var/mobile/...' -o out.bin). get_syslog captures the live unified system log across all processes (the stream Console.app shows) for a few seconds — it is a live capture, so trigger the activity you want to observe during the window. get_crash_logs lists crash reports (filter by bundle_id), and read_crash_log returns a single report's full text. write_file is blocked while the device is locked or the screen is off."
         }
     };
 }
@@ -1820,19 +1909,35 @@ static NSString *MCPLogId(id reqId) {
         },
         @{
             @"name": @"drag_and_drop",
-            @"description": @"Long press at start point and drag to end point (for moving icons, reordering, etc.)",
+            @"description": @"Long press at the first point, drag through optional path points, and release at the last point (for moving icons, reordering, etc.)",
             @"inputSchema": @{
                 @"type": @"object",
                 @"properties": @{
+                    @"points": @{
+                        @"type": @"array",
+                        @"description": @"Optional drag path points. When provided, the first point is pressed and the last point is released. Example: [{\"x\":100,\"y\":300},{\"x\":160,\"y\":340},{\"x\":220,\"y\":300}]",
+                        @"minItems": @2,
+                        @"items": @{
+                            @"type": @"object",
+                            @"properties": @{
+                                @"x": @{@"type": @"number", @"description": @"X coordinate in screen points"},
+                                @"y": @{@"type": @"number", @"description": @"Y coordinate in screen points"}
+                            },
+                            @"required": @[@"x", @"y"]
+                        }
+                    },
                     @"fromX": @{@"type": @"number", @"description": @"Start X in screen points"},
                     @"fromY": @{@"type": @"number", @"description": @"Start Y in screen points"},
                     @"toX":   @{@"type": @"number", @"description": @"End X in screen points"},
                     @"toY":   @{@"type": @"number", @"description": @"End Y in screen points"},
                     @"hold_duration": @{@"type": @"number", @"description": @"Hold duration before drag in milliseconds (default: 500)"},
-                    @"move_duration": @{@"type": @"number", @"description": @"Drag move duration in milliseconds (default: 300)"},
-                    @"steps":  @{@"type": @"integer", @"description": @"Number of intermediate move events (default: 20)"}
+                    @"move_duration": @{@"type": @"number", @"description": @"Total drag move duration in milliseconds (default: 300)"},
+                    @"steps":  @{@"type": @"integer", @"description": @"Total number of intermediate move events across the path (default: 20)"}
                 },
-                @"required": @[@"fromX", @"fromY", @"toX", @"toY"]
+                @"anyOf": @[
+                    @{@"required": @[@"points"]},
+                    @{@"required": @[@"fromX", @"fromY", @"toX", @"toY"]}
+                ]
             }
         },
         // ---- URL tools ----
@@ -1908,24 +2013,28 @@ static NSString *MCPLogId(id reqId) {
         // ---- App install/uninstall tools ----
         @{
             @"name": @"install_app",
-            @"description": @"Install an IPA file that already exists on the device filesystem. If the IPA is on the computer, first upload it with POST /upload_file using raw IPA bytes, for example: curl -H 'X-Filename: app.ipa' --data-binary @app.ipa http://device-ip:8090/upload_file. The upload response returns a device path such as /tmp/ios-mcp-uploads/<id>-app.ipa; pass that path to install_app. If the IPA is already on the phone, call install_app directly with its device path. Unsigned or fakesigned IPAs are supported.",
+            @"description": @"Install an IPA or DEB package that already exists on the device filesystem. If the file is on the computer, first upload it with POST /upload_file using raw bytes, for example: curl -H 'X-Filename: app.ipa' --data-binary @app.ipa http://device-ip:8090/upload_file or curl -H 'X-Filename: package.deb' --data-binary @package.deb http://device-ip:8090/upload_file. The upload response returns a device path such as /tmp/ios-mcp-uploads/<id>-app.ipa; pass that path to install_app. IPA files use the app install flow and support unsigned or fakesigned IPAs. DEB files are installed with dpkg and trigger a SpringBoard restart after installation succeeds.",
             @"inputSchema": @{
                 @"type": @"object",
                 @"properties": @{
-                    @"path": @{@"type": @"string", @"description": @"Absolute path to the .ipa file already on device (e.g. /tmp/ios-mcp-uploads/app.ipa or /tmp/app.ipa). For a computer-local IPA, POST raw IPA bytes to /upload_file first and use the returned path."}
+                    @"path": @{@"type": @"string", @"description": @"Absolute path to the .ipa or .deb file already on device (e.g. /tmp/ios-mcp-uploads/app.ipa, /tmp/ios-mcp-uploads/package.deb, or /tmp/package.deb). For a computer-local file, POST raw bytes to /upload_file first and use the returned path."}
                 },
                 @"required": @[@"path"]
             }
         },
         @{
             @"name": @"uninstall_app",
-            @"description": @"Uninstall an app by bundle identifier. Use list_apps to find the bundle_id first.",
+            @"description": @"Uninstall an app by bundle identifier or a DEB package by package identifier. Use list_apps to find an app bundle_id. For DEB packages, pass package_id such as com.example.package; removal uses dpkg and triggers a SpringBoard restart after success.",
             @"inputSchema": @{
                 @"type": @"object",
                 @"properties": @{
-                    @"bundle_id": @{@"type": @"string", @"description": @"App bundle identifier to uninstall (e.g. com.example.app). Use list_apps to find it."}
+                    @"bundle_id": @{@"type": @"string", @"description": @"App bundle identifier to uninstall (e.g. com.example.app). Use list_apps to find it."},
+                    @"package_id": @{@"type": @"string", @"description": @"DEB package identifier to uninstall with dpkg (e.g. com.example.package). SpringBoard is restarted after successful removal."}
                 },
-                @"required": @[@"bundle_id"]
+                @"anyOf": @[
+                    @{@"required": @[@"bundle_id"]},
+                    @{@"required": @[@"package_id"]}
+                ]
             }
         },
         // ---- Reverse-engineering: app info, filesystem, logs ----
@@ -3282,40 +3391,52 @@ static NSString *MCPLogId(id reqId) {
     double holdDuration = 500;
     double moveDuration = 300;
     double stepsValue = 20;
-    if (!MCPNumberFromArgs(args, @"fromX", 0, YES, &fromX, &paramError) ||
-        !MCPNumberFromArgs(args, @"fromY", 0, YES, &fromY, &paramError) ||
-        !MCPNumberFromArgs(args, @"toX", 0, YES, &toX, &paramError) ||
-        !MCPNumberFromArgs(args, @"toY", 0, YES, &toY, &paramError) ||
+    NSArray<NSValue *> *points = nil;
+    if (!MCPPointArrayFromArgs(args, @"points", &points, &paramError) ||
         !MCPNumberFromArgs(args, @"hold_duration", 500, NO, &holdDuration, &paramError) ||
         !MCPNumberFromArgs(args, @"move_duration", 300, NO, &moveDuration, &paramError) ||
         !MCPNumberFromArgs(args, @"steps", 20, NO, &stepsValue, &paramError)) {
         return [self mcpError:reqId code:-32602 message:paramError];
     }
+
+    if (!points) {
+        if (!MCPNumberFromArgs(args, @"fromX", 0, YES, &fromX, &paramError) ||
+            !MCPNumberFromArgs(args, @"fromY", 0, YES, &fromY, &paramError) ||
+            !MCPNumberFromArgs(args, @"toX", 0, YES, &toX, &paramError) ||
+            !MCPNumberFromArgs(args, @"toY", 0, YES, &toY, &paramError)) {
+            return [self mcpError:reqId code:-32602 message:paramError];
+        }
+        points = @[
+            [NSValue valueWithCGPoint:CGPointMake(fromX, fromY)],
+            [NSValue valueWithCGPoint:CGPointMake(toX, toY)],
+        ];
+    }
+
     if (holdDuration <= 0) holdDuration = 500;
     if (moveDuration <= 0) moveDuration = 300;
     NSInteger steps = (NSInteger)stepsValue;
     if (steps <= 0) steps = 20;
 
-    CGPoint from = CGPointMake(fromX, fromY);
-    CGPoint to = CGPointMake(toX, toY);
+    CGPoint from = [points.firstObject CGPointValue];
+    CGPoint to = [points.lastObject CGPointValue];
     __block BOOL ok = NO;
     __block NSString *err = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-    [[IOSMCPHIDManager sharedInstance] dragFromPoint:from
-                                             toPoint:to
-                                        holdDuration:holdDuration
-                                        moveDuration:moveDuration
-                                               steps:steps
-                                          completion:^(BOOL success, NSString *error) {
+    [[IOSMCPHIDManager sharedInstance] dragAlongPoints:points
+                                          holdDuration:holdDuration
+                                          moveDuration:moveDuration
+                                                 steps:steps
+                                            completion:^(BOOL success, NSString *error) {
         ok = success;
         err = error;
         dispatch_semaphore_signal(sem);
     }];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC));
+    NSTimeInterval timeoutSeconds = MAX(15.0, ((holdDuration + moveDuration) / 1000.0) + 5.0);
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSeconds * NSEC_PER_SEC)));
 
     if (ok) {
-        return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Dragged from (%.1f, %.1f) to (%.1f, %.1f), hold %.0fms, move %.0fms", from.x, from.y, to.x, to.y, holdDuration, moveDuration]];
+        return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Dragged along %lu points from (%.1f, %.1f) to (%.1f, %.1f), hold %.0fms, move %.0fms", (unsigned long)points.count, from.x, from.y, to.x, to.y, holdDuration, moveDuration]];
     }
     return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Drag and drop failed: %@", err ?: @"timeout"] isError:YES];
 }
@@ -3711,7 +3832,9 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
     BOOL ok = [[AppManager sharedInstance] installApp:path error:&err];
 
     if (ok) {
-        return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Installed app from %@", path]];
+        NSString *extension = path.pathExtension.lowercaseString ?: @"";
+        NSString *packageKind = [extension isEqualToString:@"deb"] ? @"DEB package" : @"app package";
+        return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Installed %@ from %@", packageKind, path]];
     }
     return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Install failed: %@", err ?: @"unknown"] isError:YES];
 }
@@ -3719,15 +3842,27 @@ static BOOL MCPSetSystemBrightness(CGFloat brightness) {
 - (NSDictionary *)executeUninstallApp:(id)reqId args:(NSDictionary *)args {
     NSString *paramError = nil;
     NSString *bundleId = nil;
-    if (!MCPStringFromArgs(args, @"bundle_id", YES, &bundleId, &paramError)) {
+    NSString *packageId = nil;
+    if (!MCPStringFromArgs(args, @"bundle_id", NO, &bundleId, &paramError) ||
+        !MCPStringFromArgs(args, @"package_id", NO, &packageId, &paramError)) {
         return [self mcpError:reqId code:-32602 message:paramError];
     }
 
+    if (bundleId.length > 0 && packageId.length > 0) {
+        return [self mcpError:reqId code:-32602 message:@"Provide either bundle_id or package_id, not both"];
+    }
+
+    NSString *identifier = packageId.length > 0 ? packageId : bundleId;
+    if (!identifier.length) {
+        return [self mcpError:reqId code:-32602 message:@"Missing required parameter: bundle_id or package_id"];
+    }
+
     NSString *err = nil;
-    BOOL ok = [[AppManager sharedInstance] uninstallApp:bundleId error:&err];
+    BOOL ok = [[AppManager sharedInstance] uninstallApp:identifier error:&err];
 
     if (ok) {
-        return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Uninstalled %@", bundleId]];
+        NSString *targetKind = packageId.length > 0 ? @"DEB package" : @"app/package";
+        return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Uninstalled %@ %@", targetKind, identifier]];
     }
     return [self mcpSuccess:reqId text:[NSString stringWithFormat:@"Uninstall failed: %@", err ?: @"unknown"] isError:YES];
 }
